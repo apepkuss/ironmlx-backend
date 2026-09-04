@@ -91,6 +91,42 @@ jobs:
         shell: bash
         run: scripts/verify-sbom.sh
 
+      - name: Install pinned Rust dependency audit tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked --version 0.22.2 cargo-audit
+          test "$(cargo audit --version)" = "cargo-audit-audit 0.22.2"
+
+      - name: Audit Rust dependencies for known vulnerabilities
+        shell: bash
+        run: cargo audit
+
+      - name: Verify license policy and reproducible third-party materials
+        shell: bash
+        run: python3 scripts/verify-license-policy.py
+
+      - name: Install pinned secret scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          scanner_dir="$RUNNER_TEMP/gitleaks-8.30.1"
+          mkdir -p "$scanner_dir"
+          archive="$scanner_dir/gitleaks.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' \
+            b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5 \
+            "$archive" | shasum --algorithm 256 --check
+          tar -xzf "$archive" -C "$scanner_dir"
+          test "$("$scanner_dir/gitleaks" version)" = "8.30.1"
+          echo "GITLEAKS_BIN=$scanner_dir/gitleaks" >> "$GITHUB_ENV"
+
+      - name: Scan tracked source tree for secrets
+        shell: bash
+        run: scripts/verify-secrets.sh
+
       - name: Install pinned license inventory tool
         shell: bash
         run: |
@@ -107,6 +143,13 @@ jobs:
         env:
           MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
         run: scripts/build-app-bundle.sh
+
+      - name: Verify reproducible third-party materials
+        shell: bash
+        env:
+          MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
+          MLX_BUILD_DIR: ${{ github.workspace }}/.build/app-bundle/mlx-build
+        run: scripts/verify-third-party-materials.sh
 
       - name: Run required Rust gates
         shell: bash
@@ -128,9 +171,23 @@ jobs:
         run: |
           set -euo pipefail
           test -f "$MLX_DIR/lib/mlx.metallib"
-          metallib="$GITHUB_WORKSPACE/ironmlx/mlx.metallib"
-          trap 'rm -f "$metallib"' EXIT
-          cp "$MLX_DIR/lib/mlx.metallib" "$metallib"
+          metallib_paths=(
+            "$GITHUB_WORKSPACE/mlx-sys/mlx.metallib"
+            "$GITHUB_WORKSPACE/ironmlx/mlx.metallib"
+            "$GITHUB_WORKSPACE/mlx/mlx.metallib"
+            "$GITHUB_WORKSPACE/ironmlx-bench-kernel/mlx.metallib"
+            "$GITHUB_WORKSPACE/turboquant/mlx.metallib"
+          )
+          cleanup_metallib() {
+            for path in "${metallib_paths[@]}"; do
+              rm -f "$path"
+            done
+          }
+          trap cleanup_metallib EXIT
+          for path in "${metallib_paths[@]}"; do
+            cp "$MLX_DIR/lib/mlx.metallib" "$path"
+          done
+          cargo test --locked --all-features --workspace -- --test-threads=1
           cargo test --locked --all-features \
             --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
             -p ironmlx --lib core::server::

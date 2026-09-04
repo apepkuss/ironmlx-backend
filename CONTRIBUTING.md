@@ -36,9 +36,9 @@ permission before submitting it.
 
 Keep changes focused, explain behavior changes, and update the English and
 Simplified Chinese user documentation when public behavior changes. Run the
-relevant Rust, Swift, App Bundle, SBOM, and model-boundary checks described in
-the README before opening a pull request. Never weaken a release or security
-gate to make a check pass.
+relevant Rust, Swift, App Bundle, SBOM, license-policy, dependency-audit,
+secret-scan, and model-boundary checks described in the README before opening a
+pull request. Never weaken a release or security gate to make a check pass.
 
 For vulnerability reports, use [SECURITY.md](SECURITY.md) instead of a public
 issue.

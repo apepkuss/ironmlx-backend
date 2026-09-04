@@ -1,0 +1,6 @@
+[allowlist]
+description = "Test-only redaction placeholders are not credentials"
+regexTarget = "secret"
+regexes = [
+  '''^(?:REDACTED|[A-Z0-9_]+_SENTINEL)$''',
+]

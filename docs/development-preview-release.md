@@ -36,12 +36,16 @@ The job:
 3. installs the pinned `cargo-about 0.9.1` inventory tool and creates a clean
    detached checkout of the MLX commit declared by
    `scripts/release-config.sh`;
-4. verifies the tracked dependency inventory and license texts against the
+4. audits the locked Rust dependency graph with the pinned `cargo-audit 0.22.2`,
+   enforces the repository license policy, and scans the tracked source tree
+   with the pinned `gitleaks 8.30.1` binary;
+5. verifies the tracked dependency inventory and license texts against the
    actual native and Rust Release inputs, then builds the self-contained App;
-5. runs stable and pinned-nightly Rust formatting checks, all-feature workspace
-   Clippy with warnings denied, and a locked Release build;
-6. runs Swift tests in Release mode;
-7. verifies the App, helpers, and Metal library as arm64 with `minos=26.2`,
+6. runs stable and pinned-nightly Rust formatting checks, all-feature workspace
+   Clippy with warnings denied, a locked Release build, and the serial full
+   workspace Rust test suite;
+7. runs Swift tests in Release mode;
+8. verifies the App, helpers, and Metal library as arm64 with `minos=26.2`,
    system-only dynamic dependencies, and no embedded developer paths.
 
 ## Current legal-material gate

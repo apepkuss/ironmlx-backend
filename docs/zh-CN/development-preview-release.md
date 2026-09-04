@@ -17,8 +17,10 @@
 GitHub Environment 或 secret，并在昂贵构建前校验 Conventional Commits。
 
 任务会检出事件 commit，安装锁定的 `cargo-about`，检出发布配置指定的 MLX commit，
-验证第三方材料，构建自包含 App，运行 Rust 格式/Clippy/Release、Swift Release 测试，
-并验证 App、helper 与 Metal library 的 arm64、macOS 26.2 和无开发路径属性。
+使用锁定的 `cargo-audit 0.22.2` 扫描 Rust 依赖、执行许可证策略检查，并使用锁定的
+`gitleaks 8.30.1` 扫描已跟踪源代码；随后验证第三方材料，构建自包含 App，运行 Rust
+格式/Clippy/Release、全 workspace 串行测试和 Swift Release 测试，并验证 App、helper
+与 Metal library 的 arm64、macOS 26.2 和无开发路径属性。
 
 ## 当前法律材料门禁
 

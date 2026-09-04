@@ -22,6 +22,6 @@ git commit -s
 
 ## 修改与验证
 
-保持改动聚焦，说明行为变化；公开行为变化时同步更新英文和简体中文文档。创建 Pull Request 前，运行 README 中适用的 Rust、Swift、App Bundle、SBOM 和模型边界检查。不要为了通过检查而削弱发布或安全门禁。
+保持改动聚焦，说明行为变化；公开行为变化时同步更新英文和简体中文文档。创建 Pull Request 前，运行 README 中适用的 Rust、Swift、App Bundle、SBOM、许可证策略、依赖审计、secret 扫描和模型边界检查。不要为了通过检查而削弱发布或安全门禁。
 
 安全漏洞请使用 [SECURITY.md](../../SECURITY.md) 私密报告，不要创建公开 issue。

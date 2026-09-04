@@ -71,10 +71,16 @@ See [Installation and build](docs/installation.md) for details, or read the
 
 ```bash
 scripts/verify-version-consistency.sh
+scripts/verify-sbom.sh
+scripts/verify-third-party-materials.sh
+python3 scripts/verify-license-policy.py
+cargo audit
+GITLEAKS_BIN=/path/to/gitleaks-8.30.1 scripts/verify-secrets.sh
 cargo fmt --all -- --check
 cargo +nightly fmt --all -- --check
 cargo +nightly clippy --locked --all-features --workspace -- -D warnings
 cargo build --locked --release
+cargo test --locked --all-features --workspace -- --test-threads=1
 swift test --package-path ironmlx-app --configuration release --no-parallel
 ```
 

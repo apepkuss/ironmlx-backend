@@ -118,7 +118,7 @@ development dependencies excluded, build dependencies retained.
 | getrandom | 0.2.17 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-42fa16951ce7f24b.txt` | https://github.com/rust-random/getrandom |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-29e9fe5074bd27e0.txt` | https://github.com/rust-random/getrandom |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-523a42c25d245dde.txt` | https://github.com/rust-random/getrandom |
-| h2 | 0.4.15 | MIT | `THIRD_PARTY_LICENSES/rust-license-b21623012e6c453d.txt` | https://github.com/hyperium/h2 |
+| h2 | 0.4.16 | MIT | `THIRD_PARTY_LICENSES/rust-license-b21623012e6c453d.txt` | https://github.com/hyperium/h2 |
 | half | 2.7.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-508a77d2e7b51d98.txt` | https://github.com/VoidStarKat/half-rs |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-ff8f68cb076caf8c.txt` | https://github.com/rust-lang/hashbrown |
 | heck | 0.5.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7b63ecd5f1902af1.txt` | https://github.com/withoutboats/heck |
