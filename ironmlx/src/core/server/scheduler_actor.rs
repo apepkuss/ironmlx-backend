@@ -5380,11 +5380,13 @@ mod tests {
     #[derive(Clone, Copy)]
     struct SchedulerActorFakeModel {
         forward_delay: Duration,
+        mtp_accepted_prefix_restore: bool,
     }
 
     #[allow(non_upper_case_globals)]
     const SchedulerActorFakeModel: SchedulerActorFakeModel = SchedulerActorFakeModel {
         forward_delay: Duration::ZERO,
+        mtp_accepted_prefix_restore: false,
     };
 
     /// Keep scheduler behavior tests independent from the host's physical RAM.
@@ -5421,7 +5423,17 @@ mod tests {
 
     impl SchedulerActorFakeModel {
         fn with_forward_delay(forward_delay: Duration) -> Self {
-            Self { forward_delay }
+            Self {
+                forward_delay,
+                mtp_accepted_prefix_restore: false,
+            }
+        }
+
+        fn with_mtp_accepted_prefix_restore(forward_delay: Duration) -> Self {
+            Self {
+                forward_delay,
+                mtp_accepted_prefix_restore: true,
+            }
         }
 
         fn maybe_delay_forward(&self) {
@@ -5664,6 +5676,72 @@ mod tests {
 
         fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> mlx::Dtype {
             mlx::Dtype::Float32
+        }
+
+        fn project_mtp_verify_hidden_on(
+            &self,
+            hidden: &mlx::Array,
+            target: impl Into<mlx::StreamOrDevice>,
+        ) -> Result<mlx::Array> {
+            if !self.mtp_accepted_prefix_restore {
+                return Model::project_hidden_on(self, hidden, target.into());
+            }
+            let shape = hidden.shape();
+            let dims = shape.as_slice();
+            fake_batched_logits(dims[0] as usize, dims[1] as usize, 5)
+        }
+
+        fn supports_mtp_accepted_prefix_restore(&self) -> bool {
+            self.mtp_accepted_prefix_restore
+        }
+
+        fn begin_mtp_accepted_prefix_capture(
+            &self,
+            cache: &mut [crate::nn::LayerCache],
+        ) -> Result<()> {
+            anyhow::ensure!(
+                self.mtp_accepted_prefix_restore,
+                "fake MTP accepted-prefix restore is disabled"
+            );
+            for layer in cache {
+                layer.begin_speculative_prefix_capture()?;
+            }
+            Ok(())
+        }
+
+        fn restore_mtp_accepted_prefix_rows_on(
+            &self,
+            cache: &mut [crate::nn::LayerCache],
+            snapshots: &[crate::nn::LayerCacheSnapshot],
+            accepted_lens: &[usize],
+            _target: mlx::StreamOrDevice,
+        ) -> Result<()> {
+            anyhow::ensure!(cache.len() == snapshots.len(), "fake cache layer mismatch");
+            for (layer, snapshot) in cache.iter_mut().zip(snapshots) {
+                let (crate::nn::LayerCache::Full(cache), crate::nn::LayerCacheSnapshot::Full(base)) =
+                    (layer, snapshot)
+                else {
+                    anyhow::bail!("fake accepted-prefix restore requires Full KV");
+                };
+                anyhow::ensure!(
+                    accepted_lens.len() == cache.offsets().len(),
+                    "fake accepted prefix rows {} != cache batch {}",
+                    accepted_lens.len(),
+                    cache.offsets().len()
+                );
+                let offsets = base
+                    .offsets()
+                    .iter()
+                    .zip(accepted_lens)
+                    .map(|(&offset, &accepted)| {
+                        offset
+                            .checked_add(i32::try_from(accepted)?)
+                            .ok_or_else(|| anyhow::anyhow!("fake accepted offset overflow"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                cache.restore_offsets(&offsets)?;
+            }
+            Ok(())
         }
 
         fn mtp_forward_hidden_on(
@@ -6228,9 +6306,9 @@ mod tests {
             "fake-qwen-mtp-active-kv",
             root.join("qualification.json"),
         );
-        let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
-            Duration::from_millis(25),
-        )));
+        let model = Arc::new(Mutex::new(
+            SchedulerActorFakeModel::with_mtp_accepted_prefix_restore(Duration::from_millis(25)),
+        ));
         let handle = spawn_scheduler_actor_with_mtp_and_active_kv(
             model,
             SchedulerActorFakeMtpHead,
@@ -6281,7 +6359,7 @@ mod tests {
             })
             .await
             .expect("send second MTP request");
-        let mut events_2 = reply_rx_2
+        let events_2 = reply_rx_2
             .await
             .expect("second reply")
             .expect("second admit")

@@ -1373,10 +1373,15 @@ async fn run_qwen_dense_mtp_active_kv_offload_case(
         after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default() > 0,
         "{model_name} requests must exercise MTP drafting: {after}"
     );
+    // Concurrent Active-KV scheduling records zero-draft control windows, so
+    // aggregate drafted_tokens > windows is not a valid multi-token predicate.
+    // The dedicated d=1 versus d=2 parity case verifies multi-token drafting.
     assert!(
-        after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default()
-            > after["mtp"]["windows"].as_u64().unwrap_or_default(),
-        "{model_name} Paged KV requests must execute at least one multi-token MTP window: {after}"
+        after["mtp"]["accepted_draft_tokens"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "{model_name} concurrent requests must accept at least one MTP draft: {after}"
     );
     assert!(
         after["active_kv_offload"]["swap_out_count"]

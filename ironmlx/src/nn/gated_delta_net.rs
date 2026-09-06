@@ -15,6 +15,7 @@ use anyhow::anyhow;
 use mlx::ops::shape::concatenate;
 use mlx::{Array, Dtype, MetalKernel, Shape, StreamOrDevice};
 
+use crate::core::cache::gated_delta::GatedDeltaReplayCapture;
 use crate::core::cache::GatedDeltaCache;
 use crate::core::Loader;
 use crate::nn::{Conv1d, Conv1dConfig, Linear, RmsNormGated};
@@ -821,9 +822,9 @@ impl GatedDeltaNet {
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
         let target = target.into();
-        if accepted_lens.is_empty() || accepted_lens.contains(&0) {
+        if accepted_lens.is_empty() {
             return Err(anyhow!(
-                "GatedDeltaNet speculative accepted prefixes cannot be empty"
+                "GatedDeltaNet accepted prefix rows cannot be empty"
             ));
         }
         let capture = cache.take_speculative_replay()?;
@@ -839,6 +840,25 @@ impl GatedDeltaNet {
             return Err(anyhow!(
                 "GatedDeltaNet accepted prefix exceeds captured sequence {sequence}"
             ));
+        }
+        if accepted_lens.contains(&0) {
+            for (row, &accepted_len) in accepted_lens.iter().enumerate() {
+                let (conv_state, recurrent_state, cached_len) = if accepted_len == 0 {
+                    capture.base.prefix_state_for_row_on(row, target)?
+                } else if capture.prefix_states.len() == sequence {
+                    capture.prefix_states[accepted_len - 1].prefix_state_for_row_on(row, target)?
+                } else {
+                    self.replay_captured_prefix_row_on(&capture, row, accepted_len, target)?
+                };
+                cache.restore_prefix_state_for_row_on(
+                    &conv_state,
+                    &recurrent_state,
+                    row,
+                    cached_len,
+                    target,
+                )?;
+            }
+            return Ok(());
         }
         if capture.prefix_states.len() != sequence {
             let batch = i32::try_from(accepted_lens.len())?;
@@ -939,6 +959,111 @@ impl GatedDeltaNet {
             )?;
         }
         Ok(())
+    }
+
+    fn replay_captured_prefix_row_on(
+        &self,
+        capture: &GatedDeltaReplayCapture,
+        row: usize,
+        accepted_len: usize,
+        target: StreamOrDevice,
+    ) -> Result<(Array, Array, i32)> {
+        let row_i32 = i32::try_from(row)?;
+        let accepted_len_i32 = i32::try_from(accepted_len)?;
+        let q = slice_sequence_prefix_on(
+            &slice_batch_row_or_broadcast(&capture.q, row_i32, target)?,
+            accepted_len_i32,
+            target,
+        )?;
+        let k = slice_sequence_prefix_on(
+            &slice_batch_row_or_broadcast(&capture.k, row_i32, target)?,
+            accepted_len_i32,
+            target,
+        )?;
+        let v = slice_sequence_prefix_on(
+            &slice_batch_row_or_broadcast(&capture.v, row_i32, target)?,
+            accepted_len_i32,
+            target,
+        )?;
+        let g = slice_sequence_prefix_on(
+            &slice_batch_row_or_broadcast(&capture.g, row_i32, target)?,
+            accepted_len_i32,
+            target,
+        )?;
+        let beta = slice_sequence_prefix_on(
+            &slice_batch_row_or_broadcast(&capture.beta, row_i32, target)?,
+            accepted_len_i32,
+            target,
+        )?;
+        let mask = capture
+            .mask
+            .as_ref()
+            .map(|mask| {
+                let row_mask = slice_batch_row_or_broadcast(mask, row_i32, target)?;
+                slice_sequence_prefix_on(&row_mask, accepted_len_i32, target)
+            })
+            .transpose()?;
+        let (_, base_recurrent_state, base_cached_len) =
+            capture.base.prefix_state_for_row_on(row, target)?;
+
+        let kernel = if mask.is_some() {
+            self.kernel_masked
+                .get_or_init(|| build_gated_delta_kernel(true).expect("build masked kernel"))
+        } else {
+            self.kernel_no_mask
+                .get_or_init(|| build_gated_delta_kernel(false).expect("build no-mask kernel"))
+        };
+        let t_arr: Array = (&[accepted_len_i32][..], ()).try_into()?;
+        let mut kernel_inputs = vec![&q, &k, &v, &g, &beta, &base_recurrent_state, &t_arr];
+        if let Some(mask) = mask.as_ref() {
+            kernel_inputs.push(mask);
+        }
+        let mut outputs = kernel
+            .dispatch_builder()
+            .inputs(&kernel_inputs)
+            .output_shapes(&[
+                Shape::from((
+                    1_i32,
+                    accepted_len_i32,
+                    self.cfg.num_v_heads,
+                    self.cfg.head_v_dim,
+                )),
+                Shape::from((
+                    1_i32,
+                    self.cfg.num_v_heads,
+                    self.cfg.head_v_dim,
+                    self.cfg.head_k_dim,
+                )),
+            ])
+            .output_dtypes(&[q.dtype(), Dtype::Float32])
+            .grid(32, self.cfg.head_v_dim, self.cfg.num_v_heads)
+            .threadgroup(32, 4, 1)
+            .template_int("Dk", self.cfg.head_k_dim)
+            .template_int("Dv", self.cfg.head_v_dim)
+            .template_int("Hk", self.cfg.num_k_heads)
+            .template_int("Hv", self.cfg.num_v_heads)
+            .template_dtype("InT", q.dtype())
+            .template_dtype("StT", Dtype::Float32)
+            .stream(target)
+            .dispatch()?;
+        let _unused_output = outputs.take_at(0)?;
+        let recurrent_state = outputs.take_at(0)?;
+
+        let conv_input = slice_batch_row_or_broadcast(&capture.conv_input, row_i32, target)?;
+        let conv_dims = conv_input.shape();
+        let conv_dims = conv_dims.as_slice();
+        let keep = self.cfg.conv_kernel_size - 1;
+        let conv_state = mlx::ops::indexing::slice_strided_on(
+            &conv_input,
+            &[0_i32, accepted_len_i32, 0][..],
+            &[1_i32, accepted_len_i32 + keep, conv_dims[2]][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?;
+        let cached_len = base_cached_len
+            .checked_add(accepted_len_i32)
+            .ok_or_else(|| anyhow!("GatedDeltaNet accepted prefix offset overflow"))?;
+        Ok((conv_state, recurrent_state, cached_len))
     }
 
     /// Preserve the cache-bearing B1 numerical morphology while the surrounding
@@ -1607,6 +1732,80 @@ mod tests {
                 "batch={batch}"
             );
         }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn captured_b2_q2_restores_only_participating_row_bitwise() {
+        let gdn = small_nonzero_gdn_components();
+        let cfg = gdn.config();
+        let new_cache = || {
+            GatedDeltaCache::new_with_cap(
+                2,
+                cfg.conv_kernel_size,
+                cfg.conv_dim(),
+                cfg.num_v_heads,
+                cfg.head_v_dim,
+                cfg.head_k_dim,
+                Dtype::Float32,
+                16,
+            )
+            .expect("cache")
+        };
+        let values = (0..2 * 2 * 32)
+            .map(|index| ((index % 23) as f32 - 11.0) * 0.01)
+            .collect::<Vec<_>>();
+        let input: Array = (values.as_slice(), &[2_i32, 2, 32][..])
+            .try_into()
+            .expect("input");
+        let verify_mask: Array = (&[true, true, false, false][..], &[2_i32, 2][..])
+            .try_into()
+            .expect("verify mask");
+
+        let mut restored = new_cache();
+        restored
+            .begin_speculative_prefix_capture()
+            .expect("begin capture");
+        gdn.forward_on(
+            &input,
+            Some(&verify_mask),
+            Some(&[2_i32, 0]),
+            Some(&mut restored),
+            StreamOrDevice::default(),
+            0,
+        )
+        .expect("captured partial-row verify");
+        gdn.restore_speculative_prefix_rows_on(
+            &mut restored,
+            &[1_usize, 0],
+            StreamOrDevice::default(),
+        )
+        .expect("restore participating row");
+
+        let expected_mask: Array = (&[true, false, false, false][..], &[2_i32, 2][..])
+            .try_into()
+            .expect("expected mask");
+        let mut expected = new_cache();
+        gdn.forward_on(
+            &input,
+            Some(&expected_mask),
+            Some(&[1_i32, 0]),
+            Some(&mut expected),
+            StreamOrDevice::default(),
+            0,
+        )
+        .expect("expected partial-row prefix");
+
+        assert_eq!(restored.offsets(), expected.offsets());
+        assert_eq!(restored.offsets(), &[1, 0]);
+        assert_eq!(
+            restored.conv_state().to_vec::<f32>().unwrap(),
+            expected.conv_state().to_vec::<f32>().unwrap()
+        );
+        assert_eq!(
+            restored.recurrent_state().to_vec::<f32>().unwrap(),
+            expected.recurrent_state().to_vec::<f32>().unwrap()
+        );
     }
 
     #[test]

@@ -13412,8 +13412,10 @@ impl<M: Model> Scheduler<M> {
             let _exact_affine8_b4_q2 = affine8_b4_exact_hot_path
                 .then(crate::nn::position_stable_qmm::exact_affine8_b4_q2_scope);
             // The direct recurrent-prefix restore path is calibrated for B2/Q2
-            // and the explicitly qualified Qwen affine8 B4/Q2 shape.
-            // Other models and batch widths retain the established replay path.
+            // and the explicitly qualified Qwen affine8 B4/Q2 shape. Rows that
+            // did not open a new MTP window are represented by accepted_len=0;
+            // recurrent caches restore those rows to the captured base while
+            // rebuilding only the participating rows.
             let accepted_prefix_capture = has_draft_tokens
                 && ((b == 2 && max_verify_len == 2) || affine8_b4_exact_hot_path)
                 && model.supports_mtp_accepted_prefix_restore();
@@ -13606,10 +13608,11 @@ impl<M: Model> Scheduler<M> {
                     && (affine8_b4_exact_hot_path || !mismatch_rows.is_empty())
                 {
                     let rollback_start = Instant::now();
-                    let accepted_lens = resolutions
-                        .iter()
-                        .map(|resolution| resolution.accepted_verify_input_len)
-                        .collect::<Vec<_>>();
+                    let mut accepted_lens = vec![0_usize; b];
+                    for (ctx_idx, resolution) in resolutions.iter().enumerate() {
+                        accepted_lens[cache_row_for_ctx[ctx_idx]] =
+                            resolution.accepted_verify_input_len;
+                    }
                     {
                         let cache = self.cache.as_mut().ok_or_else(|| {
                             anyhow!("fill_mtp_windows_batched: main cache absent")
