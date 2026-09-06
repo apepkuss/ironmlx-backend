@@ -13,9 +13,12 @@
 //! The Qwen3.6 MoE variant uses `QWEN36_MOE_MODEL` and
 //! `QWEN36_MOE_MTP_MODEL`.
 
+#[path = "common/ironmlx_process.rs"]
+mod ironmlx_process;
+
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,9 +33,7 @@ struct ServerProcess {
 
 impl ServerProcess {
     fn spawn(model_dir: &Path, mtp_model_dir: &Path, cache_dir: &Path, port: u16) -> Self {
-        let bin = env!("CARGO_BIN_EXE_ironmlx");
-        let mlx_dir = std::env::var("MLX_DIR").expect("MLX_DIR must be set");
-        let mut cmd = Command::new(bin);
+        let mut cmd = ironmlx_process::command();
         cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
         cmd.args([
             "serve",
@@ -69,7 +70,6 @@ impl ServerProcess {
             "--max-cache-cap",
             "4096",
         ]);
-        cmd.env("MLX_DIR", mlx_dir);
         cmd.env("RUST_LOG", "ironmlx=debug,warn");
         cmd.env("IRONMLX_CHUNKED_ROLLING_PROFILE", "1");
         cmd.stderr(Stdio::piped());

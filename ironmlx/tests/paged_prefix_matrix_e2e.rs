@@ -15,10 +15,13 @@
 //!   -- --ignored --test-threads=1 --nocapture
 //! ```
 
+#[path = "common/ironmlx_process.rs"]
+mod ironmlx_process;
+
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -200,8 +203,6 @@ impl ServerProcess {
         max_cache_cap: usize,
         mtp_draft_tokens: usize,
     ) -> Self {
-        let bin = env!("CARGO_BIN_EXE_ironmlx");
-        let mlx_dir = std::env::var("MLX_DIR").expect("MLX_DIR must be set");
         let prefix_cache_max_pages = max_cache_cap.div_ceil(16).max(4_096);
         let mut args = vec![
             "serve".to_owned(),
@@ -259,10 +260,9 @@ impl ServerProcess {
             args.push("--mtp-draft-tokens".to_owned());
             args.push(mtp_draft_tokens.to_string());
         }
-        let mut cmd = Command::new(bin);
+        let mut cmd = ironmlx_process::command();
         cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
         cmd.args(args);
-        cmd.env("MLX_DIR", mlx_dir);
         cmd.env("RUST_LOG", "ironmlx=debug,warn");
         cmd.stderr(Stdio::piped());
         cmd.stdout(Stdio::null());

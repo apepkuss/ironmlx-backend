@@ -3,8 +3,10 @@
 //! These tests are ignored by default because they require local MLX runtime and
 //! Hugging Face checkpoint snapshots.
 
+#[path = "common/ironmlx_process.rs"]
+mod ironmlx_process;
+
 use std::path::PathBuf;
-use std::process::Command;
 
 fn require_env_path(name: &str) -> PathBuf {
     PathBuf::from(std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set")))
@@ -21,7 +23,7 @@ fn coco_path() -> PathBuf {
 fn run_text_generate_smoke(model_env: &str, mtp_model_env: &str) {
     let model_dir = require_env_path(model_env);
     let mtp_model_dir = require_env_path(mtp_model_env);
-    let output = Command::new(env!("CARGO_BIN_EXE_ironmlx"))
+    let output = ironmlx_process::command()
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .arg("generate")
         .arg("--model")
@@ -57,7 +59,7 @@ fn run_text_generate_smoke(model_env: &str, mtp_model_env: &str) {
 fn run_vl_generate_smoke(model_env: &str, mtp_model_env: &str) {
     let model_dir = require_env_path(model_env);
     let mtp_model_dir = require_env_path(mtp_model_env);
-    let output = Command::new(env!("CARGO_BIN_EXE_ironmlx"))
+    let output = ironmlx_process::command()
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .arg("generate")
         .arg("--model")

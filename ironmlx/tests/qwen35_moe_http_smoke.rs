@@ -8,6 +8,9 @@
 //!
 //! Time budget: ~30-60s for model load + a few seconds per token decode.
 
+#[path = "common/ironmlx_process.rs"]
+mod ironmlx_process;
+
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -39,11 +42,8 @@ async fn p5c_http_smoke_chat_completion_non_stream() {
         p
     };
 
-    // Spawn ironmlx serve.
-    // MLX_DIR is needed at link time but also at runtime for some mlx artifacts.
-    // The test process already has it (passed via cargo test invocation), but
-    // the child binary needs it too. Inherit env explicitly.
-    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ironmlx"));
+    // Spawn ironmlx serve with the metallib installed alongside the linked MLX.
+    let mut cmd = ironmlx_process::command();
     cmd.args([
         "serve",
         "--model",
