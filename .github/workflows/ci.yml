@@ -166,6 +166,9 @@ jobs:
       - name: Run public API contract tests
         shell: bash
         env:
+          # Scheduler unit tests exercise fixed high-capacity fixtures and must
+          # not inherit the hosted runner's physical-memory tier.
+          IRONMLX_TOTAL_RAM_BYTES: "68719476736"
           MLX_DIR: ${{ github.workspace }}/.build/app-bundle/mlx-install
           MLX_METAL_PATH: ${{ github.workspace }}/.build/app-bundle/mlx-install/lib
         run: |

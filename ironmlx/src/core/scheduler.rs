@@ -13407,8 +13407,9 @@ impl<M: Model> Scheduler<M> {
                 None
             };
             let b = self.cache_rows.len();
-            let affine8_b4_exact_hot_path =
-                has_draft_tokens && model.supports_affine8_b4_mtp_exact_hot_path(b, max_verify_len);
+            let affine8_b4_exact_hot_path = has_draft_tokens
+                && crate::nn::verify_qmm::affine8_b4_q2_exact_supported()
+                && model.supports_affine8_b4_mtp_exact_hot_path(b, max_verify_len);
             let _exact_affine8_b4_q2 = affine8_b4_exact_hot_path
                 .then(crate::nn::position_stable_qmm::exact_affine8_b4_q2_scope);
             // The direct recurrent-prefix restore path is calibrated for B2/Q2

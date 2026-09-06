@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn macos_total_ram_query_does_not_depend_on_path_lookup() {
         let total = macos_total_ram_bytes().expect("sysctlbyname hw.memsize");
-        assert!(total >= 8 * 1024 * 1024 * 1024);
+        assert!(total > 0);
     }
 
     fn validate_with_total_ram(

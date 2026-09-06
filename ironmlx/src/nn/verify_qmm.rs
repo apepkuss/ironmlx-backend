@@ -26,6 +26,7 @@ use super::linear::QuantizedLinearParts;
 const MIN_ROUTE_N: i32 = 16_384;
 const MSG_MIN_N: i32 = 100_000;
 const MSG_NSG: i32 = 8;
+const AFFINE8_B4_Q2_EXACT_ARCHITECTURE: &str = "applegpu_g17s";
 
 thread_local! {
     static ROUTE_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -141,6 +142,19 @@ fn affine8_b4_q2_exact_kernel() -> Result<&'static MetalKernel> {
     Ok(CELL.get_or_init(|| kernel))
 }
 
+fn affine8_b4_q2_exact_supported_on(architecture: Option<&str>) -> bool {
+    architecture == Some(AFFINE8_B4_Q2_EXACT_ARCHITECTURE)
+}
+
+/// The fused B4/Q2 kernel is a profiled execution route, not a portable
+/// replacement for MLX QMV. Keep unknown GPU generations on the established
+/// position-isolated path until bitwise equivalence is qualified there.
+pub(crate) fn affine8_b4_q2_exact_supported() -> bool {
+    static ARCHITECTURE: OnceLock<Option<String>> = OnceLock::new();
+    let architecture = ARCHITECTURE.get_or_init(|| mlx::metal::architecture().ok());
+    affine8_b4_q2_exact_supported_on(architecture.as_deref())
+}
+
 /// Execute the qualified Qwen3.8 affine8 B4/Q2 projection with the same
 /// accumulation tree as ordinary B4/Q1 QMV while sharing each weight tile
 /// across two verify vectors.
@@ -149,6 +163,9 @@ pub(crate) fn forward_affine8_b4_q2_exact_on(
     parts: QuantizedLinearParts<'_>,
     target: impl Into<StreamOrDevice>,
 ) -> Result<Option<Array>> {
+    if !affine8_b4_q2_exact_supported() {
+        return Ok(None);
+    }
     let dims = x.shape();
     let dims = dims.as_slice();
     let weight_dims = parts.weight.shape();
@@ -657,9 +674,12 @@ mod tests {
             bits: 8,
             mode: QuantMode::Affine,
         };
-        let candidate = forward_affine8_b4_q2_exact_on(&x, parts, ())
-            .unwrap()
-            .expect("qualified B4/Q2 morphology");
+        let candidate = forward_affine8_b4_q2_exact_on(&x, parts, ()).unwrap();
+        if !affine8_b4_q2_exact_supported() {
+            assert!(candidate.is_none());
+            return;
+        }
+        let candidate = candidate.expect("qualified B4/Q2 morphology");
         let mut ordinary_positions = Vec::with_capacity(2);
         for position in 0..2_i32 {
             let position_x = mlx::ops::indexing::slice_strided(
@@ -696,6 +716,15 @@ mod tests {
             .to_vec::<f32>()
             .unwrap();
         assert_eq!(candidate, ordinary);
+    }
+
+    #[test]
+    fn affine8_b4_q2_exact_route_rejects_uncertified_architectures() {
+        assert!(affine8_b4_q2_exact_supported_on(Some(
+            AFFINE8_B4_Q2_EXACT_ARCHITECTURE
+        )));
+        assert!(!affine8_b4_q2_exact_supported_on(Some("applegpu_g14g")));
+        assert!(!affine8_b4_q2_exact_supported_on(None));
     }
 
     fn assert_candidate_matches_native(
