@@ -2099,6 +2099,7 @@ pub(crate) struct QwenMtpDraftPolicyState {
     probe_budget: Option<usize>,
     probe_origin_budget: Option<usize>,
     probe_windows_remaining: usize,
+    long_context_mtp_warmup_windows_remaining: usize,
     cooldown_windows: usize,
     next_probe_cooldown_windows: usize,
 }
@@ -2113,6 +2114,7 @@ pub(crate) struct QwenMtpDraftPolicySnapshot {
     probe_budget: Option<usize>,
     probe_origin_budget: Option<usize>,
     probe_windows_remaining: usize,
+    long_context_mtp_warmup_windows_remaining: usize,
     cooldown_windows: usize,
     next_probe_cooldown_windows: usize,
 }
@@ -2124,13 +2126,18 @@ impl QwenMtpDraftPolicyState {
     const MIN_COST_SAMPLES: usize = 2;
     const PROBE_WINDOWS: usize = 2;
     const ZERO_DRAFT_MIN_COST_SAMPLES: usize = 8;
-    // A 32K prompt enters the UpTo128k regime as soon as the prefill token is
-    // committed. Waiting for eight d=1 windows can spend most of a short
-    // response on an unprofitable exact-verify path before ordinary decode is
-    // measured. Keep the pre-Gemma policy at shorter contexts, but sample the
-    // ordinary control after one complete long-context window.
-    const LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES: usize = 1;
+    // The first two MTP windows after entering a 32K+ regime include the
+    // post-prefill transition and deferred setup. Omit both before collecting
+    // cost samples unless the second window is also partially accepted; two
+    // consecutive partial windows are enough evidence to probe ordinary decode.
+    const LONG_CONTEXT_MTP_WARMUP_WINDOWS: usize = 2;
+    const LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES: usize = 2;
     const ZERO_DRAFT_PROBE_WINDOWS: usize = 4;
+    // The first long-context d=0 window resolves deferred work from the MTP
+    // window that armed the probe and is not representative of steady-state
+    // ordinary decode. Keep the MTP cache synchronized, but omit that transition
+    // window from the cost estimate before collecting the four measured controls.
+    const LONG_CONTEXT_ZERO_DRAFT_WARMUP_WINDOWS: usize = 1;
     const INITIAL_PROBE_COOLDOWN_WINDOWS: usize = 8;
     const MAX_PROBE_COOLDOWN_WINDOWS: usize = 64;
     const COST_IMPROVEMENT_RATIO: f64 = 0.95;
@@ -2151,6 +2158,7 @@ impl QwenMtpDraftPolicyState {
             probe_budget: None,
             probe_origin_budget: None,
             probe_windows_remaining: 0,
+            long_context_mtp_warmup_windows_remaining: 0,
             cooldown_windows: 0,
             next_probe_cooldown_windows: (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2)
                 .min(Self::MAX_PROBE_COOLDOWN_WINDOWS),
@@ -2189,6 +2197,8 @@ impl QwenMtpDraftPolicyState {
             probe_budget: self.probe_budget,
             probe_origin_budget: self.probe_origin_budget,
             probe_windows_remaining: self.probe_windows_remaining,
+            long_context_mtp_warmup_windows_remaining: self
+                .long_context_mtp_warmup_windows_remaining,
             cooldown_windows: self.cooldown_windows,
             next_probe_cooldown_windows: self.next_probe_cooldown_windows,
         }
@@ -2224,6 +2234,8 @@ impl QwenMtpDraftPolicyState {
         self.probe_budget = snapshot.probe_budget;
         self.probe_origin_budget = snapshot.probe_origin_budget;
         self.probe_windows_remaining = snapshot.probe_windows_remaining;
+        self.long_context_mtp_warmup_windows_remaining =
+            snapshot.long_context_mtp_warmup_windows_remaining;
         self.cooldown_windows = snapshot.cooldown_windows;
         self.next_probe_cooldown_windows = snapshot.next_probe_cooldown_windows;
         Ok(())
@@ -2234,39 +2246,60 @@ impl QwenMtpDraftPolicyState {
             return MtpDraftBudgetChange::default();
         }
         let regime = window.regime();
-        if self.active_regime != Some(regime) {
+        let long_context = matches!(
+            regime.context_bucket,
+            MtpDraftCapContextBucket::UpTo128k | MtpDraftCapContextBucket::Above128k
+        );
+        let regime_changed = self.active_regime != Some(regime);
+        if regime_changed {
             self.active_regime = Some(regime);
             self.acceptance_ewma = None;
             self.cost_estimates.clear();
             self.probe_budget = None;
             self.probe_origin_budget = None;
             self.probe_windows_remaining = 0;
+            self.long_context_mtp_warmup_windows_remaining =
+                usize::from(long_context) * Self::LONG_CONTEXT_MTP_WARMUP_WINDOWS;
             self.cooldown_windows = 0;
             self.next_probe_cooldown_windows =
                 (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2).min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
         }
         let old = self.current_budget();
 
+        let zero_draft_transition_warmup = long_context
+            && window.attempted_draft_tokens == 0
+            && self.probe_budget == Some(0)
+            && self.probe_windows_remaining > Self::ZERO_DRAFT_PROBE_WINDOWS;
+        let mtp_transition_window = long_context
+            && window.attempted_draft_tokens > 0
+            && window.attempted_draft_tokens == old
+            && self.probe_budget.is_none()
+            && self.long_context_mtp_warmup_windows_remaining > 0;
+        let repeated_partial_transition = mtp_transition_window
+            && self.long_context_mtp_warmup_windows_remaining == 1
+            && window.accepted_draft_tokens < window.attempted_draft_tokens;
+        if mtp_transition_window {
+            self.long_context_mtp_warmup_windows_remaining -= 1;
+        }
+        let omit_mtp_transition_sample = mtp_transition_window && !repeated_partial_transition;
         let acceptance = window.acceptance_rate();
-        self.acceptance_ewma = Some(update_ewma(
-            self.acceptance_ewma,
-            acceptance,
-            Self::EWMA_ALPHA,
-        ));
-        self.record_cost(
-            regime,
-            window.attempted_draft_tokens,
-            window.qwen_cost_per_committed_token_us(),
-            acceptance,
-        );
+        if !zero_draft_transition_warmup && !omit_mtp_transition_sample {
+            self.acceptance_ewma = Some(update_ewma(
+                self.acceptance_ewma,
+                acceptance,
+                Self::EWMA_ALPHA,
+            ));
+            self.record_cost(
+                regime,
+                window.attempted_draft_tokens,
+                window.qwen_cost_per_committed_token_us(),
+                acceptance,
+            );
+        }
         if window.attempted_draft_tokens != old {
             return MtpDraftBudgetChange::default();
         }
 
-        let long_context = matches!(
-            regime.context_bucket,
-            MtpDraftCapContextBucket::UpTo128k | MtpDraftCapContextBucket::Above128k
-        );
         let zero_draft_probe_min_samples = if long_context {
             Self::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES
         } else {
@@ -2276,9 +2309,15 @@ impl QwenMtpDraftPolicyState {
             && old > 0
             && self.probe_budget.is_none()
             && self.cost_estimate(regime, 0).is_none()
-            && self
-                .cost_estimate(regime, old)
-                .is_some_and(|estimate| estimate.samples >= 1)
+            && self.cost_estimate(regime, old).is_some_and(|estimate| {
+                let required_samples =
+                    if window.accepted_draft_tokens < window.attempted_draft_tokens {
+                        1
+                    } else {
+                        Self::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES
+                    };
+                estimate.samples >= required_samples
+            })
         {
             // At 32K+, first compare the configured production depth directly
             // with ordinary decode. Traversing every adjacent depth before the
@@ -2286,8 +2325,20 @@ impl QwenMtpDraftPolicyState {
             self.current_budget = 0;
             self.probe_budget = Some(0);
             self.probe_origin_budget = Some(old);
-            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
+            self.probe_windows_remaining =
+                Self::ZERO_DRAFT_PROBE_WINDOWS + Self::LONG_CONTEXT_ZERO_DRAFT_WARMUP_WINDOWS;
             return budget_change(old, self.current_budget);
+        }
+        if long_context
+            && old > 0
+            && self.probe_budget.is_none()
+            && self.cost_estimate(regime, 0).is_none()
+        {
+            // Keep the initial production depth stable until the second
+            // representative MTP window is available. Otherwise the generic
+            // adjacent-depth explorer would move to d-1 after the first sample
+            // and reintroduce the same transition bias before the d=0 control.
+            return MtpDraftBudgetChange::default();
         }
         if old == 1
             && self.probe_budget.is_none()
@@ -2299,7 +2350,8 @@ impl QwenMtpDraftPolicyState {
             self.current_budget = 0;
             self.probe_budget = Some(0);
             self.probe_origin_budget = Some(old);
-            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
+            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS
+                + usize::from(long_context) * Self::LONG_CONTEXT_ZERO_DRAFT_WARMUP_WINDOWS;
             return budget_change(old, self.current_budget);
         }
         if old == 0 && self.probe_budget.is_none() {
@@ -2322,7 +2374,8 @@ impl QwenMtpDraftPolicyState {
             self.current_budget = 0;
             self.probe_budget = Some(0);
             self.probe_origin_budget = Some(old);
-            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
+            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS
+                + usize::from(long_context) * Self::LONG_CONTEXT_ZERO_DRAFT_WARMUP_WINDOWS;
             return budget_change(old, self.current_budget);
         }
 
@@ -4794,6 +4847,12 @@ mod tests {
         let mut long_window = policy_window(1, 2, 200);
         long_window.context_tokens = 32_769;
 
+        for _ in 0..QwenMtpDraftPolicyState::LONG_CONTEXT_MTP_WARMUP_WINDOWS {
+            let transition = policy.observe_window(long_window);
+            assert!(!transition.reduced);
+            assert_eq!(policy.current_budget(), 1);
+        }
+        assert!(policy.cost_estimate(long_window.regime(), 1).is_none());
         for _ in 0..QwenMtpDraftPolicyState::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES - 1 {
             let change = policy.observe_window(long_window);
             assert!(!change.reduced);
@@ -4807,15 +4866,49 @@ mod tests {
     }
 
     #[test]
-    fn qwen_mtp_policy_compares_partial_long_context_window_with_ordinary_decode() {
+    fn qwen_mtp_policy_requires_a_second_partial_long_context_window() {
         let mut policy = QwenMtpDraftPolicyState::new(2);
         let mut long_window = policy_window(2, 2, 200);
         long_window.context_tokens = 32_769;
         long_window.accepted_draft_tokens = 1;
 
-        let change = policy.observe_window(long_window);
+        let first = policy.observe_window(long_window);
+        assert!(!first.reduced);
+        assert_eq!(policy.current_budget(), 2);
+        assert!(policy.cost_estimate(long_window.regime(), 2).is_none());
 
-        assert!(change.reduced);
+        let second = policy.observe_window(long_window);
+        assert!(second.reduced);
+        assert_eq!(policy.current_budget(), 0);
+        assert_eq!(policy.probe_budget, Some(0));
+        assert_eq!(policy.probe_origin_budget, Some(2));
+        assert_eq!(
+            policy
+                .cost_estimate(long_window.regime(), 2)
+                .unwrap()
+                .samples,
+            1
+        );
+    }
+
+    #[test]
+    fn qwen_mtp_policy_waits_after_partial_then_full_long_context_transition() {
+        let mut policy = QwenMtpDraftPolicyState::new(2);
+        let mut transition = policy_window(2, 2, 200);
+        transition.context_tokens = 32_769;
+        transition.accepted_draft_tokens = 1;
+
+        let mut steady = policy_window(2, 3, 100);
+        steady.context_tokens = 32_769;
+
+        assert!(!policy.observe_window(transition).reduced);
+        for _ in 1..QwenMtpDraftPolicyState::LONG_CONTEXT_MTP_WARMUP_WINDOWS {
+            assert!(!policy.observe_window(steady).reduced);
+        }
+        for _ in 0..QwenMtpDraftPolicyState::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES - 1 {
+            assert!(!policy.observe_window(steady).reduced);
+        }
+        assert!(policy.observe_window(steady).reduced);
         assert_eq!(policy.current_budget(), 0);
         assert_eq!(policy.probe_budget, Some(0));
         assert_eq!(policy.probe_origin_budget, Some(2));
@@ -4840,12 +4933,51 @@ mod tests {
         let mut long_window = policy_window(2, 3, 200);
         long_window.context_tokens = 32_769;
 
+        for _ in 0..QwenMtpDraftPolicyState::LONG_CONTEXT_MTP_WARMUP_WINDOWS {
+            assert!(!policy.observe_window(long_window).reduced);
+        }
+        for _ in 0..QwenMtpDraftPolicyState::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES - 1 {
+            assert!(!policy.observe_window(long_window).reduced);
+        }
         let change = policy.observe_window(long_window);
 
         assert!(change.reduced);
         assert_eq!(policy.current_budget(), 0);
         assert_eq!(policy.probe_budget, Some(0));
         assert_eq!(policy.probe_origin_budget, Some(2));
+    }
+
+    #[test]
+    fn qwen_mtp_policy_omits_long_context_zero_draft_transition_from_cost() {
+        let mut policy = QwenMtpDraftPolicyState::new(2);
+        let mut mtp_window = policy_window(2, 3, 60);
+        mtp_window.context_tokens = 32_769;
+        for _ in 0..QwenMtpDraftPolicyState::LONG_CONTEXT_MTP_WARMUP_WINDOWS {
+            assert!(!policy.observe_window(mtp_window).reduced);
+        }
+        for _ in 0..QwenMtpDraftPolicyState::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES - 1 {
+            assert!(!policy.observe_window(mtp_window).reduced);
+        }
+        assert!(policy.observe_window(mtp_window).reduced);
+
+        let regime = mtp_window.regime();
+        let mut transition = policy_window(0, 1, 1_000);
+        transition.context_tokens = 32_769;
+        assert!(!policy.observe_window(transition).reduced);
+        assert_eq!(policy.probe_windows_remaining, 4);
+        assert!(policy.cost_estimate(regime, 0).is_none());
+
+        let mut steady = policy_window(0, 1, 10);
+        steady.context_tokens = 32_769;
+        for _ in 0..QwenMtpDraftPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(steady);
+        }
+
+        let control = policy.cost_estimate(regime, 0).unwrap();
+        assert_eq!(control.samples, 4);
+        assert_eq!(control.cost_ewma, 10.0);
+        assert!(policy.uses_ordinary_decode());
+        assert!(!policy.should_maintain_mtp_cache());
     }
 
     #[test]
@@ -4874,6 +5006,31 @@ mod tests {
 
         assert_eq!(policy.current_budget(), 1);
         assert!(!policy.uses_ordinary_decode());
+    }
+
+    #[test]
+    fn qwen_mtp_policy_snapshot_preserves_long_context_mtp_warmup() {
+        let mut source = QwenMtpDraftPolicyState::new(2);
+        let mut transition = policy_window(2, 2, 200);
+        transition.context_tokens = 32_769;
+        transition.accepted_draft_tokens = 1;
+        assert!(!source.observe_window(transition).reduced);
+        let snapshot = source.snapshot();
+
+        let mut restored = QwenMtpDraftPolicyState::new(2);
+        restored.restore_snapshot(snapshot.clone()).unwrap();
+
+        assert_eq!(restored.snapshot(), snapshot);
+        let mut steady = policy_window(2, 3, 100);
+        steady.context_tokens = 32_769;
+        for _ in 1..(QwenMtpDraftPolicyState::LONG_CONTEXT_MTP_WARMUP_WINDOWS
+            + QwenMtpDraftPolicyState::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES)
+        {
+            source.observe_window(steady);
+            restored.observe_window(steady);
+            assert_eq!(restored.snapshot(), source.snapshot());
+        }
+        assert_eq!(restored.current_budget(), 0);
     }
 
     #[test]
