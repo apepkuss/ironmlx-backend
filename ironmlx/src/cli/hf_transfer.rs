@@ -104,6 +104,9 @@ struct JsonProgressState {
     total: u64,
     last_emitted_bytes: u64,
     last_emitted_at: Instant,
+    awaiting_baseline: bool,
+    #[cfg(test)]
+    first_emitted_bytes: Option<u64>,
 }
 
 impl Default for JsonProgressState {
@@ -113,6 +116,9 @@ impl Default for JsonProgressState {
             total: 0,
             last_emitted_bytes: 0,
             last_emitted_at: Instant::now(),
+            awaiting_baseline: false,
+            #[cfg(test)]
+            first_emitted_bytes: None,
         }
     }
 }
@@ -124,21 +130,30 @@ impl Progress for JsonProgress {
             state.total = size as u64;
             state.last_emitted_bytes = 0;
             state.last_emitted_at = Instant::now();
-            emit_event(&TransferEvent::Progress {
-                bytes: 0,
-                total: state.total,
-            });
+            state.awaiting_baseline = true;
         }
     }
 
     async fn update(&mut self, size: usize) {
         if let Ok(mut state) = self.state.lock() {
-            state.bytes = state.bytes.saturating_add(size as u64).min(state.total);
+            // hf-hub reports the committed starting offset as its first update,
+            // before reporting newly transferred chunks.
+            let baseline = std::mem::take(&mut state.awaiting_baseline);
+            state.bytes = if baseline {
+                (size as u64).min(state.total)
+            } else {
+                state.bytes.saturating_add(size as u64).min(state.total)
+            };
             let now = Instant::now();
-            if state.bytes == state.total
+            if baseline
+                || state.bytes == state.total
                 || state.bytes.saturating_sub(state.last_emitted_bytes) >= PROGRESS_MIN_BYTES
                 || now.duration_since(state.last_emitted_at) >= PROGRESS_MAX_INTERVAL
             {
+                #[cfg(test)]
+                if state.first_emitted_bytes.is_none() {
+                    state.first_emitted_bytes = Some(state.bytes);
+                }
                 emit_event(&TransferEvent::Progress {
                     bytes: state.bytes,
                     total: state.total,
@@ -153,6 +168,10 @@ impl Progress for JsonProgress {
         if let Ok(mut state) = self.state.lock() {
             state.bytes = state.total;
             if state.last_emitted_bytes != state.total {
+                #[cfg(test)]
+                if state.first_emitted_bytes.is_none() {
+                    state.first_emitted_bytes = Some(state.bytes);
+                }
                 emit_event(&TransferEvent::Progress {
                     bytes: state.bytes,
                     total: state.total,
@@ -216,6 +235,10 @@ pub fn run(args: HfTransferArgs) -> Result<()> {
 }
 
 async fn run_async(args: HfTransferArgs) -> Result<()> {
+    run_async_with_progress(args, JsonProgress::default()).await
+}
+
+async fn run_async_with_progress(args: HfTransferArgs, progress: JsonProgress) -> Result<()> {
     let expected_sha256 = args.expected_sha256.to_ascii_lowercase();
     if args.destination.exists() {
         let actual_size = args.destination.metadata()?.len();
@@ -301,7 +324,7 @@ async fn run_async(args: HfTransferArgs) -> Result<()> {
     });
 
     let download_result = api_repo
-        .download_with_progress(&args.filename, JsonProgress::default())
+        .download_with_progress(&args.filename, progress)
         .await;
     stop_hashing.store(true, Ordering::Release);
     let cursor = hash_task
@@ -823,6 +846,47 @@ mod tests {
         fs::remove_dir_all(root).expect("remove test root");
     }
 
+    #[tokio::test]
+    async fn json_progress_uses_first_update_as_absolute_resume_baseline() {
+        let mut progress = JsonProgress::default();
+
+        progress.init(100, "model.safetensors").await;
+        {
+            let state = progress.state.lock().expect("progress state");
+            assert!(state.awaiting_baseline);
+            assert_eq!(state.bytes, 0);
+            assert_eq!(state.last_emitted_bytes, 0);
+        }
+
+        progress.update(20).await;
+        {
+            let state = progress.state.lock().expect("progress state");
+            assert!(!state.awaiting_baseline);
+            assert_eq!(state.bytes, 20);
+            assert_eq!(state.last_emitted_bytes, 20);
+            assert_eq!(state.first_emitted_bytes, Some(20));
+        }
+
+        progress.update(7).await;
+        let state = progress.state.lock().expect("progress state");
+        assert_eq!(state.bytes, 27);
+        assert_eq!(state.last_emitted_bytes, 20);
+    }
+
+    #[tokio::test]
+    async fn json_progress_reports_zero_when_hf_hub_discards_partial() {
+        let mut progress = JsonProgress::default();
+
+        progress.init(100, "model.safetensors").await;
+        progress.update(0).await;
+
+        let state = progress.state.lock().expect("progress state");
+        assert!(!state.awaiting_baseline);
+        assert_eq!(state.bytes, 0);
+        assert_eq!(state.last_emitted_bytes, 0);
+        assert_eq!(state.first_emitted_bytes, Some(0));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hf_hub_resumes_committed_ranges_and_publishes_verified_destination() {
         let payload = Arc::new(
@@ -885,20 +949,33 @@ mod tests {
             .expect("write committed marker");
         file.sync_all().expect("sync partial");
 
-        run_async(HfTransferArgs {
-            repo_id: "org/model".to_string(),
-            revision: commit,
-            filename: "model.safetensors".to_string(),
-            destination: destination.clone(),
-            cache_dir: cache_dir.clone(),
-            expected_size: payload.len() as u64,
-            expected_sha256: expected_sha256.clone(),
-            endpoint: format!("http://{address}"),
-            parallelism: 4,
-            chunk_size: 256 * 1024,
-        })
+        let progress = JsonProgress::default();
+        run_async_with_progress(
+            HfTransferArgs {
+                repo_id: "org/model".to_string(),
+                revision: commit,
+                filename: "model.safetensors".to_string(),
+                destination: destination.clone(),
+                cache_dir: cache_dir.clone(),
+                expected_size: payload.len() as u64,
+                expected_sha256: expected_sha256.clone(),
+                endpoint: format!("http://{address}"),
+                parallelism: 4,
+                chunk_size: 256 * 1024,
+            },
+            progress.clone(),
+        )
         .await
         .expect("run hf-hub transfer");
+
+        assert_eq!(
+            progress
+                .state
+                .lock()
+                .expect("progress state")
+                .first_emitted_bytes,
+            Some(resume_offset)
+        );
 
         assert_eq!(fs::read(&destination).expect("read destination"), *payload);
         assert_eq!(
