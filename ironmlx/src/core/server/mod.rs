@@ -1347,6 +1347,7 @@ where
                 scheduler_handle.mtp_drafted_tokens.clone(),
                 scheduler_handle.mtp_accepted_draft_tokens.clone(),
                 scheduler_handle.mtp_windows.clone(),
+                scheduler_handle.mtp_multi_token_windows.clone(),
                 scheduler_handle.mtp_exact_sampling_windows.clone(),
                 scheduler_handle.mtp_exact_acceptance_draws.clone(),
                 scheduler_handle.mtp_exact_residual_corrections.clone(),
@@ -2012,6 +2013,7 @@ mod tests {
             mtp_drafted_tokens: Arc::new(AtomicU64::new(0)),
             mtp_accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
             mtp_windows: Arc::new(AtomicU64::new(0)),
+            mtp_multi_token_windows: Arc::new(AtomicU64::new(0)),
             mtp_exact_sampling_windows: Arc::new(AtomicU64::new(0)),
             mtp_exact_acceptance_draws: Arc::new(AtomicU64::new(0)),
             mtp_exact_residual_corrections: Arc::new(AtomicU64::new(0)),
@@ -2085,6 +2087,7 @@ mod tests {
             .mtp_accepted_draft_tokens
             .store(13, Ordering::Relaxed);
         handle.mtp_windows.store(17, Ordering::Relaxed);
+        handle.mtp_multi_token_windows.store(13, Ordering::Relaxed);
         handle.mtp_draft_forward_us.store(19, Ordering::Relaxed);
         handle.mtp_verify_forward_us.store(23, Ordering::Relaxed);
         handle.mtp_projection_us.store(29, Ordering::Relaxed);
@@ -2113,6 +2116,7 @@ mod tests {
                 handle.mtp_drafted_tokens.clone(),
                 handle.mtp_accepted_draft_tokens.clone(),
                 handle.mtp_windows.clone(),
+                handle.mtp_multi_token_windows.clone(),
                 handle.mtp_exact_sampling_windows.clone(),
                 handle.mtp_exact_acceptance_draws.clone(),
                 handle.mtp_exact_residual_corrections.clone(),
@@ -2145,6 +2149,7 @@ mod tests {
         assert_eq!(snapshot.mtp.drafted_tokens, 11);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 13);
         assert_eq!(snapshot.mtp.windows, 17);
+        assert_eq!(snapshot.mtp.multi_token_windows, 13);
         assert_eq!(snapshot.mtp.draft_forward_us, 19);
         assert_eq!(snapshot.mtp.verify_forward_us, 23);
         assert_eq!(snapshot.mtp.projection_us, 29);

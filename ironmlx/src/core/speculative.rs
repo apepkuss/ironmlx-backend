@@ -318,6 +318,14 @@ pub struct MtpSpeculativeStats {
 }
 
 impl MtpSpeculativeStats {
+    /// Speculative windows that attempted at least two draft tokens.
+    pub fn multi_token_windows(&self) -> usize {
+        self.draft_attempts_by_position
+            .get(1)
+            .copied()
+            .unwrap_or_default()
+    }
+
     pub(crate) fn draft_cap_timing(&self) -> MtpDraftCapTiming {
         MtpDraftCapTiming {
             draft_forward_us: self.draft_forward_us,
@@ -4337,6 +4345,7 @@ mod tests {
 
         assert_eq!(stats.draft_attempts_by_position, vec![3, 3, 2, 2]);
         assert_eq!(stats.draft_accepts_by_position, vec![2, 2, 0, 0]);
+        assert_eq!(stats.multi_token_windows(), 3);
     }
 
     #[test]

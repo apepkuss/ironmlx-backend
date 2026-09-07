@@ -92,6 +92,8 @@ pub struct MtpHealthInfo {
     pub drafted_tokens: u64,
     pub accepted_draft_tokens: u64,
     pub windows: u64,
+    /// Windows that attempted at least two draft tokens.
+    pub multi_token_windows: u64,
     pub exact_sampling_windows: u64,
     pub exact_acceptance_draws: u64,
     pub exact_residual_corrections: u64,
@@ -386,6 +388,7 @@ pub struct MtpHealthConfig {
     drafted_tokens: Arc<AtomicU64>,
     accepted_draft_tokens: Arc<AtomicU64>,
     windows: Arc<AtomicU64>,
+    multi_token_windows: Arc<AtomicU64>,
     exact_sampling_windows: Arc<AtomicU64>,
     exact_acceptance_draws: Arc<AtomicU64>,
     exact_residual_corrections: Arc<AtomicU64>,
@@ -420,6 +423,7 @@ impl MtpHealthConfig {
             drafted_tokens: Arc::new(AtomicU64::new(0)),
             accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
             windows: Arc::new(AtomicU64::new(0)),
+            multi_token_windows: Arc::new(AtomicU64::new(0)),
             exact_sampling_windows: Arc::new(AtomicU64::new(0)),
             exact_acceptance_draws: Arc::new(AtomicU64::new(0)),
             exact_residual_corrections: Arc::new(AtomicU64::new(0)),
@@ -453,6 +457,7 @@ impl MtpHealthConfig {
         drafted_tokens: Arc<AtomicU64>,
         accepted_draft_tokens: Arc<AtomicU64>,
         windows: Arc<AtomicU64>,
+        multi_token_windows: Arc<AtomicU64>,
         exact_sampling_windows: Arc<AtomicU64>,
         exact_acceptance_draws: Arc<AtomicU64>,
         exact_residual_corrections: Arc<AtomicU64>,
@@ -484,6 +489,7 @@ impl MtpHealthConfig {
             drafted_tokens,
             accepted_draft_tokens,
             windows,
+            multi_token_windows,
             exact_sampling_windows,
             exact_acceptance_draws,
             exact_residual_corrections,
@@ -516,6 +522,7 @@ impl MtpHealthConfig {
             drafted_tokens: self.drafted_tokens.load(Ordering::Relaxed),
             accepted_draft_tokens: self.accepted_draft_tokens.load(Ordering::Relaxed),
             windows: self.windows.load(Ordering::Relaxed),
+            multi_token_windows: self.multi_token_windows.load(Ordering::Relaxed),
             exact_sampling_windows: self.exact_sampling_windows.load(Ordering::Relaxed),
             exact_acceptance_draws: self.exact_acceptance_draws.load(Ordering::Relaxed),
             exact_residual_corrections: self.exact_residual_corrections.load(Ordering::Relaxed),
@@ -1325,6 +1332,7 @@ mod tests {
         assert_eq!(snapshot.mtp.drafted_tokens, 0);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 0);
         assert_eq!(snapshot.mtp.windows, 0);
+        assert_eq!(snapshot.mtp.multi_token_windows, 0);
         assert_eq!(snapshot.mtp.draft_forward_us, 0);
         assert_eq!(snapshot.mtp.verify_forward_us, 0);
         assert_eq!(snapshot.mtp.projection_us, 0);
@@ -1656,6 +1664,7 @@ mod tests {
         let drafted_tokens = Arc::new(AtomicU64::new(17));
         let accepted_draft_tokens = Arc::new(AtomicU64::new(19));
         let windows = Arc::new(AtomicU64::new(23));
+        let multi_token_windows = Arc::new(AtomicU64::new(17));
         let exact_sampling_windows = Arc::new(AtomicU64::new(5));
         let exact_acceptance_draws = Arc::new(AtomicU64::new(12));
         let exact_residual_corrections = Arc::new(AtomicU64::new(3));
@@ -1691,6 +1700,7 @@ mod tests {
             drafted_tokens.clone(),
             accepted_draft_tokens.clone(),
             windows.clone(),
+            multi_token_windows.clone(),
             exact_sampling_windows.clone(),
             exact_acceptance_draws.clone(),
             exact_residual_corrections.clone(),
@@ -1723,6 +1733,7 @@ mod tests {
         assert_eq!(snapshot.mtp.drafted_tokens, 17);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 19);
         assert_eq!(snapshot.mtp.windows, 23);
+        assert_eq!(snapshot.mtp.multi_token_windows, 17);
         assert_eq!(snapshot.mtp.draft_forward_us, 29);
         assert_eq!(snapshot.mtp.verify_forward_us, 31);
         assert_eq!(snapshot.mtp.projection_us, 37);
@@ -1761,6 +1772,7 @@ mod tests {
         drafted_tokens.store(29, Ordering::Relaxed);
         accepted_draft_tokens.store(31, Ordering::Relaxed);
         windows.store(37, Ordering::Relaxed);
+        multi_token_windows.store(31, Ordering::Relaxed);
         exact_sampling_windows.store(7, Ordering::Relaxed);
         exact_acceptance_draws.store(18, Ordering::Relaxed);
         exact_residual_corrections.store(4, Ordering::Relaxed);
@@ -1785,6 +1797,7 @@ mod tests {
             drafted_tokens,
             accepted_draft_tokens,
             windows,
+            multi_token_windows,
             exact_sampling_windows,
             exact_acceptance_draws,
             exact_residual_corrections,
@@ -1814,6 +1827,7 @@ mod tests {
         assert_eq!(snapshot.mtp.drafted_tokens, 29);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 31);
         assert_eq!(snapshot.mtp.windows, 37);
+        assert_eq!(snapshot.mtp.multi_token_windows, 31);
         assert_eq!(snapshot.mtp.exact_sampling_windows, 7);
         assert_eq!(snapshot.mtp.exact_acceptance_draws, 18);
         assert_eq!(snapshot.mtp.exact_residual_corrections, 4);
@@ -1894,6 +1908,7 @@ mod tests {
                 drafted_tokens: 0,
                 accepted_draft_tokens: 0,
                 windows: 0,
+                multi_token_windows: 0,
                 exact_sampling_windows: 0,
                 exact_acceptance_draws: 0,
                 exact_residual_corrections: 0,
@@ -1923,6 +1938,7 @@ mod tests {
         let value = serde_json::to_value(snapshot).expect("serialize health snapshot");
         assert_eq!(value["memory"]["mlx_total_bytes"], 55);
         assert_eq!(value["memory"]["available_ram_bytes"], 48);
+        assert_eq!(value["mtp"]["multi_token_windows"], 0);
         assert_eq!(value["memory"]["mlx_max_recommended_bytes"], 66);
         assert_eq!(value["memory"]["mlx_active_bytes"], 11);
         assert_eq!(value["memory"]["mlx_cache_bytes"], 22);

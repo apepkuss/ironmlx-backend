@@ -6,6 +6,7 @@
 //! ```text
 //! MLX_DIR=$HOME/.local/mlx \
 //! QWEN35_MODEL=/path/to/Qwen3.5-4B-MLX-4bit/snapshots/<sha> \
+//! QWEN35_MTP_MODEL=/path/to/Qwen3.5-4B-MTP-4bit/snapshots/<sha> \
 //! QWEN36_DENSE_MODEL=/path/to/Qwen3.6-27B-4bit/snapshots/<sha> \
 //! QWEN36_DENSE_MTP_MODEL=/path/to/Qwen3.6-27B-MTP-4bit/snapshots/<sha> \
 //! QWEN38_DENSE_MODEL=/path/to/Qwen3.8-27B-4bit/snapshots/<sha> \
@@ -116,6 +117,7 @@ impl ServerProcess {
         cache_dir: &Path,
         port: u16,
         max_cache_cap: usize,
+        draft_tokens: usize,
     ) -> Self {
         Self::spawn_with_options_and_max_cache_cap(
             model_dir,
@@ -125,8 +127,9 @@ impl ServerProcess {
             Some(mtp_model_dir),
             port,
             1,
+            2_048,
             max_cache_cap,
-            2,
+            draft_tokens,
         )
     }
 
@@ -145,6 +148,7 @@ impl ServerProcess {
             Some(mtp_model_dir),
             port,
             1,
+            0,
             4_096,
             draft_tokens,
         )
@@ -186,6 +190,7 @@ impl ServerProcess {
             mtp_model_dir,
             port,
             max_sequences,
+            0,
             4_096,
             2,
         )
@@ -200,6 +205,7 @@ impl ServerProcess {
         mtp_model_dir: Option<&Path>,
         port: u16,
         max_sequences: usize,
+        prefill_chunk_size: usize,
         max_cache_cap: usize,
         mtp_draft_tokens: usize,
     ) -> Self {
@@ -231,7 +237,7 @@ impl ServerProcess {
             "--admission-queue-max".to_owned(),
             "8".to_owned(),
             "--prefill-chunk-size".to_owned(),
-            "0".to_owned(),
+            prefill_chunk_size.to_string(),
             "--max-cache-cap".to_owned(),
             max_cache_cap.to_string(),
         ];
@@ -350,7 +356,17 @@ fn snapshot_from_env_or_default(env_name: &str, repo_dir: &str) -> PathBuf {
 }
 
 fn qwen35_model_dir() -> PathBuf {
-    snapshot_from_env_or_default("QWEN35_MODEL", "models--mlx-community--Qwen3.5-4B-MLX-4bit")
+    snapshot_from_env_or_default(
+        "QWEN35_MODEL",
+        "huggingface/mlx-community--Qwen3.5-4B-MLX-4bit",
+    )
+}
+
+fn qwen35_mtp_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "QWEN35_MTP_MODEL",
+        "huggingface/mlx-community--Qwen3.5-4B-MTP-4bit",
+    )
 }
 
 fn qwen36_dense_model_dir() -> PathBuf {
@@ -1497,8 +1513,12 @@ async fn run_paged_kv_multi_token_parity_case(
         "{model_name} Paged KV multi-token MTP must preserve the completion length"
     );
     assert!(
-        after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default()
-            > after["mtp"]["windows"].as_u64().unwrap_or_default(),
+        after["mtp"]["multi_token_windows"]
+            .as_u64()
+            .unwrap_or_default()
+            > before["mtp"]["multi_token_windows"]
+                .as_u64()
+                .unwrap_or_default(),
         "{model_name} draft=2 must execute at least one multi-token MTP window: before={before}, after={after}"
     );
     assert_eq!(
@@ -1537,58 +1557,101 @@ async fn gemma4_unified_paged_kv_multi_token_matches_single_token_drafter() {
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires QWEN38_DENSE_MODEL, QWEN38_DENSE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
-async fn qwen38_dense_mtp_long_context_remains_on_exact_path() {
-    let minimum_context_tokens = std::env::var("MTP_LONG_CONTEXT_TOKENS")
-        .ok()
-        .map(|value| value.parse::<usize>())
-        .transpose()
-        .expect("parse MTP_LONG_CONTEXT_TOKENS")
-        .unwrap_or(8_192);
-    assert!(
-        minimum_context_tokens > 4_096,
-        "long-context MTP acceptance must cross the former 4096-token cap"
-    );
-
-    let model_dir = qwen38_dense_model_dir();
-    let mtp_model_dir = qwen38_dense_mtp_model_dir();
-    let cache_dir = unique_temp_dir("qwen38-dense-mtp-long-context-prefix");
-    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
-    let max_cache_cap = minimum_context_tokens.saturating_add(4_096);
-    let port = alloc_port().await;
-    let mut server = ServerProcess::spawn_with_mtp_long_context(
-        &model_dir,
-        &mtp_model_dir,
-        &cache_dir,
-        port,
-        max_cache_cap,
-    );
-    let client = long_context_client();
-    wait_ready(&client, port, &mut server).await;
-
-    let before = healthz(&client, port).await;
-    assert_mtp_draft_width(&before, 2);
+async fn run_qwen35_dense_paged_kv_long_context_multi_token_case(
+    model_dir: &Path,
+    mtp_model_dir: &Path,
+    minimum_context_tokens: usize,
+) {
+    let prompt = long_context_prompt(model_dir, minimum_context_tokens);
     let body = serde_json::json!({
         "model": "paged-prefix-matrix",
-        "messages": [{
-            "role": "user",
-            "content": long_context_prompt(&model_dir, minimum_context_tokens)
-        }],
+        "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 32,
         "temperature": 0.0,
         "stream": false
     });
-    let response = post_chat_with_server_diagnostics(&client, port, body, &server).await;
+    let max_cache_cap = minimum_context_tokens.saturating_add(4_096);
+
+    let single_cache_dir = unique_temp_dir(&format!(
+        "qwen35-dense-mtp-long-context-{minimum_context_tokens}-d1"
+    ));
+    std::fs::create_dir_all(&single_cache_dir).expect("create draft=1 prefix cache dir");
+    let single_port = alloc_port().await;
+    let mut single_server = ServerProcess::spawn_with_mtp_long_context(
+        model_dir,
+        mtp_model_dir,
+        &single_cache_dir,
+        single_port,
+        max_cache_cap,
+        1,
+    );
+    let client = long_context_client();
+    wait_ready(&client, single_port, &mut single_server).await;
+    let single_before = healthz(&client, single_port).await;
+    assert_mtp_draft_width(&single_before, 1);
+    let single =
+        post_chat_with_server_diagnostics(&client, single_port, body.clone(), &single_server).await;
+    let single_after = healthz(&client, single_port).await;
     assert!(
-        response["usage"]["prompt_tokens"]
+        single["usage"]["prompt_tokens"]
             .as_u64()
             .unwrap_or_default()
             >= minimum_context_tokens as u64,
-        "request did not reach the requested long context: {response}"
+        "draft=1 request did not reach {minimum_context_tokens} prompt tokens: {single}"
     );
+    assert_eq!(
+        single_after["mtp"]["fallback_prefill_count"],
+        single_before["mtp"]["fallback_prefill_count"],
+        "draft=1 long-context request must not fall back: before={single_before}, after={single_after}"
+    );
+    assert_eq!(
+        single_after["mtp"]["multi_token_windows"], single_before["mtp"]["multi_token_windows"],
+        "draft=1 must not report multi-token windows: before={single_before}, after={single_after}"
+    );
+    assert_eq!(
+        single_after["scheduler"]["b_active"].as_u64(),
+        Some(0),
+        "draft=1 request must release its scheduler slot: {single_after}"
+    );
+    drop(single_server);
+    std::fs::remove_dir_all(&single_cache_dir).expect("cleanup draft=1 prefix cache dir");
 
-    let after = healthz(&client, port).await;
+    let multi_cache_dir = unique_temp_dir(&format!(
+        "qwen35-dense-mtp-long-context-{minimum_context_tokens}-d2"
+    ));
+    std::fs::create_dir_all(&multi_cache_dir).expect("create draft=2 prefix cache dir");
+    let multi_port = alloc_port().await;
+    let mut multi_server = ServerProcess::spawn_with_mtp_long_context(
+        model_dir,
+        mtp_model_dir,
+        &multi_cache_dir,
+        multi_port,
+        max_cache_cap,
+        2,
+    );
+    wait_ready(&client, multi_port, &mut multi_server).await;
+    let multi_before = healthz(&client, multi_port).await;
+    assert_mtp_draft_width(&multi_before, 2);
+    let multi = post_chat_with_server_diagnostics(&client, multi_port, body, &multi_server).await;
+    let multi_after = healthz(&client, multi_port).await;
+
+    assert!(
+        multi["usage"]["prompt_tokens"].as_u64().unwrap_or_default()
+            >= minimum_context_tokens as u64,
+        "draft=2 request did not reach {minimum_context_tokens} prompt tokens: {multi}"
+    );
+    assert_eq!(
+        multi["choices"][0]["message"], single["choices"][0]["message"],
+        "Qwen3.5 {minimum_context_tokens}-token draft=2 output must match draft=1"
+    );
+    assert_eq!(
+        multi["choices"][0]["finish_reason"], single["choices"][0]["finish_reason"],
+        "Qwen3.5 {minimum_context_tokens}-token finish reason must match draft=1"
+    );
+    assert_eq!(
+        multi["usage"]["completion_tokens"], single["usage"]["completion_tokens"],
+        "Qwen3.5 {minimum_context_tokens}-token completion length must match draft=1"
+    );
     for field in [
         "prefill_count",
         "step_count",
@@ -1596,45 +1659,67 @@ async fn qwen38_dense_mtp_long_context_remains_on_exact_path() {
         "accepted_draft_tokens",
     ] {
         assert!(
-            after["mtp"][field].as_u64().unwrap_or_default()
-                > before["mtp"][field].as_u64().unwrap_or_default(),
-            "long-context request must increase mtp.{field}: before={before}, after={after}"
+            multi_after["mtp"][field].as_u64().unwrap_or_default()
+                > multi_before["mtp"][field].as_u64().unwrap_or_default(),
+            "draft=2 long-context request must increase mtp.{field}: before={multi_before}, after={multi_after}"
         );
     }
     assert_eq!(
-        after["mtp"]["fallback_prefill_count"], before["mtp"]["fallback_prefill_count"],
-        "long-context request must not fall back from MTP: before={before}, after={after}"
+        multi_after["mtp"]["fallback_prefill_count"],
+        multi_before["mtp"]["fallback_prefill_count"],
+        "draft=2 long-context request must not fall back: before={multi_before}, after={multi_after}"
     );
     assert!(
-        after["mtp"]["accepted_draft_tokens"]
+        multi_after["mtp"]["accepted_draft_tokens"]
             .as_u64()
             .unwrap_or_default()
-            <= after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default(),
-        "accepted MTP drafts cannot exceed proposed drafts: {after}"
+            <= multi_after["mtp"]["drafted_tokens"]
+                .as_u64()
+                .unwrap_or_default(),
+        "accepted MTP drafts cannot exceed proposed drafts: {multi_after}"
     );
     assert!(
-        after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default()
-            > after["mtp"]["windows"].as_u64().unwrap_or_default(),
-        "long-context Paged KV must execute at least one multi-token MTP window: {after}"
+        multi_after["mtp"]["multi_token_windows"]
+            .as_u64()
+            .unwrap_or_default()
+            > multi_before["mtp"]["multi_token_windows"]
+                .as_u64()
+                .unwrap_or_default(),
+        "Qwen3.5 {minimum_context_tokens}-token request must attempt a second draft position: before={multi_before}, after={multi_after}"
     );
     assert_eq!(
-        after["scheduler"]["b_active"].as_u64(),
+        multi_after["scheduler"]["b_active"].as_u64(),
         Some(0),
-        "long-context MTP request must release its scheduler slot: {after}"
+        "draft=2 request must release its scheduler slot: {multi_after}"
     );
     eprintln!(
-        "Qwen3.8 MTP long-context acceptance: prompt_tokens={} prefill_count={} step_count={} \
+        "Qwen3.5 MTP long-context acceptance: prompt_tokens={} multi_token_windows={} \
          drafted_tokens={} accepted_draft_tokens={} fallback_prefill_count={}",
-        response["usage"]["prompt_tokens"],
-        after["mtp"]["prefill_count"],
-        after["mtp"]["step_count"],
-        after["mtp"]["drafted_tokens"],
-        after["mtp"]["accepted_draft_tokens"],
-        after["mtp"]["fallback_prefill_count"]
+        multi["usage"]["prompt_tokens"],
+        multi_after["mtp"]["multi_token_windows"],
+        multi_after["mtp"]["drafted_tokens"],
+        multi_after["mtp"]["accepted_draft_tokens"],
+        multi_after["mtp"]["fallback_prefill_count"]
     );
 
-    drop(server);
-    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+    drop(multi_server);
+    std::fs::remove_dir_all(&multi_cache_dir).expect("cleanup draft=2 prefix cache dir");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN35_MODEL, QWEN35_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+async fn qwen35_dense_paged_kv_long_context_multi_token_mtp_matches_single_token() {
+    let model_dir = qwen35_model_dir();
+    let mtp_model_dir = qwen35_mtp_model_dir();
+
+    for minimum_context_tokens in [8_192, 32_768, 65_536] {
+        run_qwen35_dense_paged_kv_long_context_multi_token_case(
+            &model_dir,
+            &mtp_model_dir,
+            minimum_context_tokens,
+        )
+        .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

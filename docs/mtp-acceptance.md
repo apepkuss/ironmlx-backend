@@ -173,22 +173,25 @@ Q1 tail must match the ordinary sequential reference exactly. Run the existing
 `qwen36_moe_qgt1_matches_sequential_verify` test separately for Paged,
 TurboQuant, and ragged-batch token-equivalence coverage.
 
-Qwen3.8-27B long-context exact-path coverage (default 8K; set
-`MTP_LONG_CONTEXT_TOKENS=32768` or `65536` for the extended matrix):
+Qwen3.5-4B Paged KV long-context multi-token coverage runs the 8K, 32K, and
+64K matrix. Each context length starts fresh `draft=1` and `draft=2` servers:
 
 ```sh
 MLX_DIR=$HOME/.local/mlx \
-QWEN38_DENSE_MODEL=/path/to/Qwen3.8-27B-4bit/snapshots/<sha> \
-QWEN38_DENSE_MTP_MODEL=/path/to/Qwen3.8-27B-MTP-4bit/snapshots/<sha> \
+QWEN35_MODEL=/path/to/Qwen3.5-4B-MLX-4bit/snapshots/<sha> \
+QWEN35_MTP_MODEL=/path/to/Qwen3.5-4B-MTP-4bit/snapshots/<sha> \
 cargo test --release -p ironmlx --test paged_prefix_matrix_e2e \
-  qwen38_dense_mtp_long_context_remains_on_exact_path \
+  qwen35_dense_paged_kv_long_context_multi_token_mtp_matches_single_token \
   -- --ignored --test-threads=1 --nocapture
 ```
 
-The request must increase `prefill_count`, `step_count`, `drafted_tokens`, and
-`accepted_draft_tokens` without increasing `fallback_prefill_count`. MTP has no
-separate 1024/4096 context cap; the model context limit, `--max-cache-cap`, and
-memory budget still apply.
+At every context length, the generated message, finish reason, and completion
+length must match exactly. The `draft=2` server must report requested and
+effective draft width 2, increase `prefill_count`, `step_count`,
+`drafted_tokens`, `accepted_draft_tokens`, and `multi_token_windows`, and leave
+`fallback_prefill_count` unchanged. `multi_token_windows` directly counts
+windows that attempted a second draft position, so later single-token or
+zero-draft control windows cannot hide the multi-token execution.
 
 Paged KV multi-token MTP must match the same checkpoint at `draft=1` exactly:
 
@@ -203,7 +206,8 @@ cargo test --release -p ironmlx --test paged_prefix_matrix_e2e \
 
 The generated message, finish reason, and completion length must match exactly.
 For the `draft=2` run, `/healthz` must report both requested and effective draft
-width as 2, with `drafted_tokens > windows` proving a multi-token window ran.
+width as 2, with a positive `multi_token_windows` delta proving a multi-token
+window ran.
 
 Run the same Paged KV check for the independent Gemma4 drafter path:
 

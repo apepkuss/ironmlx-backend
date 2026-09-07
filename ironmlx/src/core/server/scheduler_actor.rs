@@ -420,6 +420,7 @@ struct SchedulerActorMtpCounters {
     mtp_drafted_tokens: Arc<AtomicU64>,
     mtp_accepted_draft_tokens: Arc<AtomicU64>,
     mtp_windows: Arc<AtomicU64>,
+    mtp_multi_token_windows: Arc<AtomicU64>,
     mtp_exact_sampling_windows: Arc<AtomicU64>,
     mtp_exact_acceptance_draws: Arc<AtomicU64>,
     mtp_exact_residual_corrections: Arc<AtomicU64>,
@@ -452,6 +453,7 @@ impl SchedulerActorMtpCounters {
         mtp_drafted_tokens: Arc<AtomicU64>,
         mtp_accepted_draft_tokens: Arc<AtomicU64>,
         mtp_windows: Arc<AtomicU64>,
+        mtp_multi_token_windows: Arc<AtomicU64>,
         mtp_exact_sampling_windows: Arc<AtomicU64>,
         mtp_exact_acceptance_draws: Arc<AtomicU64>,
         mtp_exact_residual_corrections: Arc<AtomicU64>,
@@ -479,6 +481,7 @@ impl SchedulerActorMtpCounters {
             mtp_drafted_tokens,
             mtp_accepted_draft_tokens,
             mtp_windows,
+            mtp_multi_token_windows,
             mtp_exact_sampling_windows,
             mtp_exact_acceptance_draws,
             mtp_exact_residual_corrections,
@@ -541,6 +544,8 @@ impl SchedulerActorMtpCounters {
     fn add_stats_delta(&self, stats: &MtpSpeculativeStats) {
         self.mtp_windows
             .fetch_add(stats.windows as u64, Ordering::Relaxed);
+        self.mtp_multi_token_windows
+            .fetch_add(stats.multi_token_windows() as u64, Ordering::Relaxed);
         self.mtp_drafted_tokens
             .fetch_add(stats.drafted_tokens as u64, Ordering::Relaxed);
         self.mtp_accepted_draft_tokens
@@ -2650,6 +2655,9 @@ pub struct SchedulerActorHandle {
     /// Latest cumulative scheduler MTP speculative-window count.
     #[doc(hidden)]
     pub mtp_windows: Arc<AtomicU64>,
+    /// Cumulative count of MTP windows that attempted at least two draft tokens.
+    #[doc(hidden)]
+    pub mtp_multi_token_windows: Arc<AtomicU64>,
     #[doc(hidden)]
     pub mtp_exact_sampling_windows: Arc<AtomicU64>,
     #[doc(hidden)]
@@ -3308,6 +3316,7 @@ where
     let mtp_drafted_tokens = Arc::new(AtomicU64::new(0));
     let mtp_accepted_draft_tokens = Arc::new(AtomicU64::new(0));
     let mtp_windows = Arc::new(AtomicU64::new(0));
+    let mtp_multi_token_windows = Arc::new(AtomicU64::new(0));
     let mtp_exact_sampling_windows = Arc::new(AtomicU64::new(0));
     let mtp_exact_acceptance_draws = Arc::new(AtomicU64::new(0));
     let mtp_exact_residual_corrections = Arc::new(AtomicU64::new(0));
@@ -3349,6 +3358,7 @@ where
         mtp_drafted_tokens.clone(),
         mtp_accepted_draft_tokens.clone(),
         mtp_windows.clone(),
+        mtp_multi_token_windows.clone(),
         mtp_exact_sampling_windows.clone(),
         mtp_exact_acceptance_draws.clone(),
         mtp_exact_residual_corrections.clone(),
@@ -3451,6 +3461,7 @@ where
         mtp_drafted_tokens,
         mtp_accepted_draft_tokens,
         mtp_windows,
+        mtp_multi_token_windows,
         mtp_exact_sampling_windows,
         mtp_exact_acceptance_draws,
         mtp_exact_residual_corrections,
@@ -6020,6 +6031,7 @@ mod tests {
             counter(),
             counter(),
             counter(),
+            counter(),
             Arc::new(StdMutex::new(None)),
             Arc::new(StdMutex::new(NeuralExactQualificationStats::default())),
         )
@@ -6935,6 +6947,26 @@ mod tests {
             400
         );
         assert_eq!(counters.mtp_cache_restore_us.load(Ordering::Relaxed), 775);
+    }
+
+    #[test]
+    fn mtp_multi_token_window_counter_survives_zero_draft_windows() {
+        let counters = test_mtp_counters();
+        let mut stats = MtpSpeculativeStats {
+            windows: 1,
+            drafted_tokens: 2,
+            accepted_draft_tokens: 1,
+            ..MtpSpeculativeStats::default()
+        };
+        stats.record_window_acceptance(2, 1);
+        counters.store_stats(Some(stats.clone()));
+
+        stats.windows += 4;
+        counters.store_stats(Some(stats));
+
+        assert_eq!(counters.mtp_windows.load(Ordering::Relaxed), 5);
+        assert_eq!(counters.mtp_drafted_tokens.load(Ordering::Relaxed), 2);
+        assert_eq!(counters.mtp_multi_token_windows.load(Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -1954,6 +1954,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut mtp_drafted_tokens = 0;
     let mut mtp_accepted_draft_tokens = 0;
     let mut mtp_windows = 0;
+    let mut mtp_multi_token_windows = 0;
     let mut mtp_exact_sampling_windows = 0;
     let mut mtp_exact_acceptance_draws = 0;
     let mut mtp_exact_residual_corrections = 0;
@@ -2021,6 +2022,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         mtp_drafted_tokens += snapshot.mtp.drafted_tokens;
         mtp_accepted_draft_tokens += snapshot.mtp.accepted_draft_tokens;
         mtp_windows += snapshot.mtp.windows;
+        mtp_multi_token_windows += snapshot.mtp.multi_token_windows;
         mtp_exact_sampling_windows += snapshot.mtp.exact_sampling_windows;
         mtp_exact_acceptance_draws += snapshot.mtp.exact_acceptance_draws;
         mtp_exact_residual_corrections += snapshot.mtp.exact_residual_corrections;
@@ -2190,6 +2192,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             drafted_tokens: mtp_drafted_tokens,
             accepted_draft_tokens: mtp_accepted_draft_tokens,
             windows: mtp_windows,
+            multi_token_windows: mtp_multi_token_windows,
             exact_sampling_windows: mtp_exact_sampling_windows,
             exact_acceptance_draws: mtp_exact_acceptance_draws,
             exact_residual_corrections: mtp_exact_residual_corrections,
@@ -2691,6 +2694,7 @@ mod tests {
                 drafted_tokens: 11,
                 accepted_draft_tokens: 13,
                 windows: 17,
+                multi_token_windows: 11,
                 exact_sampling_windows: 0,
                 exact_acceptance_draws: 0,
                 exact_residual_corrections: 0,
@@ -2728,6 +2732,7 @@ mod tests {
         assert_eq!(aggregated.mtp.drafted_tokens, 11);
         assert_eq!(aggregated.mtp.accepted_draft_tokens, 13);
         assert_eq!(aggregated.mtp.windows, 17);
+        assert_eq!(aggregated.mtp.multi_token_windows, 11);
         assert_eq!(aggregated.mtp.draft_forward_us, 19);
         assert_eq!(aggregated.mtp.verify_forward_us, 23);
         assert_eq!(aggregated.mtp.projection_us, 29);
