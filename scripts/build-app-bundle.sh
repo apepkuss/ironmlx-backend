@@ -38,25 +38,7 @@ for tool in base64 cargo cmake codesign ditto git iconutil lipo plutil realpath 
   command -v "$tool" >/dev/null || fail "required build tool is missing: $tool"
 done
 
-case "$UPDATE_CHANNEL" in
-  disabled)
-    [ -z "$UPDATE_FEED_URL" ] || fail "disabled updates must not provide IRONMLX_UPDATE_FEED_URL"
-    [ -z "$UPDATE_PUBLIC_ED_KEY" ] || fail "disabled updates must not provide IRONMLX_UPDATE_PUBLIC_ED_KEY"
-    ;;
-  development)
-    [[ "$UPDATE_FEED_URL" =~ ^https://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?/ ]] || \
-      fail "development update feed must use HTTPS on a loopback host"
-    [ -n "$UPDATE_PUBLIC_ED_KEY" ] || fail "development updates require IRONMLX_UPDATE_PUBLIC_ED_KEY"
-    decoded_update_key_length="$(
-      printf '%s' "$UPDATE_PUBLIC_ED_KEY" | base64 -D 2>/dev/null | wc -c | tr -d '[:space:]'
-    )" || fail "development update public EdDSA key is not valid base64"
-    [ "$decoded_update_key_length" = 32 ] || \
-      fail "development update public EdDSA key must decode to 32 bytes"
-    ;;
-  *)
-    fail "unsupported phase-one update channel: $UPDATE_CHANNEL"
-    ;;
-esac
+python3 "$SCRIPT_DIR/configure-app-updates.py" "$UPDATE_CHANNEL" "$UPDATE_FEED_URL" "$UPDATE_PUBLIC_ED_KEY"
 if [ -n "$APP_BUILD_NUMBER" ]; then
   [[ "$APP_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || \
     fail "IRONMLX_APP_BUILD_NUMBER must be a positive integer"
@@ -177,16 +159,8 @@ plutil -replace IronMLXNotarizationStatus -string not_notarized "$APP_BUNDLE/Con
 if [ -n "$APP_BUILD_NUMBER" ]; then
   plutil -replace CFBundleVersion -string "$APP_BUILD_NUMBER" "$APP_BUNDLE/Contents/Info.plist"
 fi
-if [ "$UPDATE_CHANNEL" = "development" ]; then
-  plutil -insert IronMLXUpdateChannel -string development "$APP_BUNDLE/Contents/Info.plist"
-  plutil -insert SUFeedURL -string "$UPDATE_FEED_URL" "$APP_BUNDLE/Contents/Info.plist"
-  plutil -insert SUPublicEDKey -string "$UPDATE_PUBLIC_ED_KEY" "$APP_BUNDLE/Contents/Info.plist"
-  plutil -insert SUEnableAutomaticChecks -bool YES "$APP_BUNDLE/Contents/Info.plist"
-  plutil -insert SUAutomaticallyUpdate -bool YES "$APP_BUNDLE/Contents/Info.plist"
-  plutil -insert SUEnableSystemProfiling -bool NO "$APP_BUNDLE/Contents/Info.plist"
-  plutil -insert SURequireSignedFeed -bool YES "$APP_BUNDLE/Contents/Info.plist"
-  plutil -insert SUVerifyUpdateBeforeExtraction -bool YES "$APP_BUNDLE/Contents/Info.plist"
-fi
+python3 "$SCRIPT_DIR/configure-app-updates.py" "$UPDATE_CHANNEL" "$UPDATE_FEED_URL" "$UPDATE_PUBLIC_ED_KEY" \
+  --plist "$APP_BUNDLE/Contents/Info.plist"
 cp "$BUILD_ROOT/swift-build/release/ironmlx-app" "$APP_BUNDLE/Contents/MacOS/IronMLX"
 sparkle_framework="$BUILD_ROOT/swift-build/release/Sparkle.framework"
 [ -d "$sparkle_framework" ] || fail "Swift build did not produce Sparkle.framework"

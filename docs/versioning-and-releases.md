@@ -141,3 +141,6 @@ reference Bundle is a current, clean, signed release. The stable packager retain
 identity, clean-source, legal-authorization, static Bundle, signing and Gatekeeper
 gates before invoking this archive engine. Content-only artifacts must not be
 published as approved stable releases.
+
+Public Sparkle channel configuration and feed deployment are documented in
+[Automatic updates](automatic-updates.md).

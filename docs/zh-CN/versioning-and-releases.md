@@ -134,3 +134,5 @@ python3 scripts/release-archives.py verify dist/IronMLX.app .build/archive-check
 版本/来源元数据及内嵌法律材料。这不证明参考 Bundle 来自当前 clean 提交或已签名。
 正式打包入口仍先执行身份、clean、分发授权、静态 Bundle、签名与 Gatekeeper 门禁。
 仅内容验证产生的文件不能作为已批准的正式版发布。
+
+公网 Sparkle 通道配置及 feed 发布流程见[自动更新](automatic-updates.md)。

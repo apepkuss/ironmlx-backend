@@ -71,6 +71,22 @@ jobs:
           test -d dist/IronMLX.app
           scripts/package-stable-release.sh dist/IronMLX.app .build/stable-release "$RELEASE_TAG"
 
+      - name: Prepare signed stable update payload
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          UPDATE_PRIVATE_KEY: ${{ secrets.IRONMLX_UPDATE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$UPDATE_PRIVATE_KEY" || { echo 'error: missing update signing key' >&2; exit 1; }
+          key_file="$RUNNER_TEMP/stable-update-key"
+          trap 'rm -f "$key_file"' EXIT
+          umask 077
+          printf '%s\n' "$UPDATE_PRIVATE_KEY" > "$key_file"
+          swift package --package-path ironmlx-app resolve
+          python3 scripts/package-app-update.py dist/IronMLX.app "$RELEASE_TAG" .build/app-update \
+            --repository "$GITHUB_REPOSITORY" --key-file "$key_file" \
+            --sign-tool ironmlx-app/.build/artifacts/sparkle/Sparkle/bin/sign_update
+
       - name: Publish immutable stable release
         shell: bash
         env:
@@ -79,6 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$RELEASE_TAG" \
+            .build/app-update/*.zip .build/app-update/*.xml .build/app-update/update.json \
             .build/stable-release/*.dmg \
             .build/stable-release/*.zip \
             .build/stable-release/SHA256SUMS \
@@ -92,3 +109,8 @@ jobs:
             --target "$(git rev-parse HEAD)" \
             --title "IronMLX $RELEASE_TAG" \
             --generate-notes
+
+      - name: Publish stable feed after release download verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish-update-feed.py .build/app-update --repository "$GITHUB_REPOSITORY"

@@ -54,11 +54,34 @@ func developmentUpdateConfigurationRequiresAutomaticDownloads() {
 }
 
 @Test
-func developmentUpdateConfigurationRejectsStableChannelInPhaseOne() {
-    var info = validUpdateInfo()
-    info[AppUpdateConfiguration.channelKey] = "stable"
+func publicUpdateChannelsAcceptRemoteSignedFeeds() throws {
+    for channel in ["stable", "release-candidate"] {
+        var info = validUpdateInfo()
+        info[AppUpdateConfiguration.channelKey] = channel
+        info["SUFeedURL"] = "https://updates.example/\(channel).xml"
+        let configuration = try AppUpdateConfiguration(infoDictionary: info)
+        #expect(configuration.channel == channel)
+    }
+}
 
-    #expect(throws: AppUpdateConfigurationError.unsupportedChannel("stable")) {
+@Test
+func publicUpdateChannelsRejectLoopbackAndCredentialURLs() {
+    for feed in ["https://127.0.0.1/feed.xml", "http://updates.example/feed.xml",
+                 "https://user:secret@updates.example/feed.xml", "https://updates.example/feed.xml#fragment"] {
+        var info = validUpdateInfo()
+        info[AppUpdateConfiguration.channelKey] = "stable"
+        info["SUFeedURL"] = feed
+        #expect(throws: AppUpdateConfigurationError.invalidPublicFeed(feed)) {
+            _ = try AppUpdateConfiguration(infoDictionary: info)
+        }
+    }
+}
+
+@Test
+func unknownUpdateChannelIsRejected() {
+    var info = validUpdateInfo()
+    info[AppUpdateConfiguration.channelKey] = "unknown"
+    #expect(throws: AppUpdateConfigurationError.unsupportedChannel("unknown")) {
         _ = try AppUpdateConfiguration(infoDictionary: info)
     }
 }

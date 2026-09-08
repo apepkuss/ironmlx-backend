@@ -226,6 +226,12 @@ jobs:
             --scratch-path .build/ci-swift \
             --no-parallel
 
+      - name: Test public update policy and Sparkle signatures
+        shell: bash
+        run: |
+          test -x .build/app-bundle/swift-build/artifacts/sparkle/Sparkle/bin/sign_update
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_app_updates.py -v
+
       - name: Re-run static Bundle gate and protect tracked sources
         shell: bash
         run: |

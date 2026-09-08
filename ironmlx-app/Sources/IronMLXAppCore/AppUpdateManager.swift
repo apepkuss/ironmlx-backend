@@ -21,6 +21,7 @@ enum AppUpdateConfigurationError: LocalizedError, Equatable {
     case unsupportedChannel(String)
     case missingValue(String)
     case invalidDevelopmentFeed(String)
+    case invalidPublicFeed(String)
     case invalidPublicEdKey
     case automaticUpdatesNotEnabled
     case signatureVerificationNotRequired
@@ -34,14 +35,16 @@ enum AppUpdateConfigurationError: LocalizedError, Equatable {
             "Missing required update configuration: \(key)"
         case let .invalidDevelopmentFeed(value):
             "Development update feed must use HTTPS on a loopback host: \(value)"
+        case let .invalidPublicFeed(value):
+            "Public update feed must use HTTPS without credentials on a non-loopback host: \(value)"
         case .invalidPublicEdKey:
-            "Development update public EdDSA key must decode to 32 bytes"
+            "Update public EdDSA key must decode to 32 bytes"
         case .automaticUpdatesNotEnabled:
-            "Development builds must enable automatic update checks and downloads"
+            "Update-enabled builds must enable automatic update checks and downloads"
         case .signatureVerificationNotRequired:
-            "Development updates must require signed feeds and pre-extraction verification"
+            "Updates must require signed feeds and pre-extraction verification"
         case .systemProfilingEnabled:
-            "Development updates must not send system profile information"
+            "Updates must not send system profile information"
         }
     }
 }
@@ -50,6 +53,7 @@ struct AppUpdateConfiguration: Equatable {
     static let channelKey = "IronMLXUpdateChannel"
     static let developmentChannel = "development"
 
+    let channel: String
     let feedURL: URL
     let publicEdKey: String
 
@@ -58,19 +62,28 @@ struct AppUpdateConfiguration: Equatable {
         guard let channel else {
             throw AppUpdateConfigurationError.missingValue(Self.channelKey)
         }
-        guard channel == Self.developmentChannel else {
+        guard [Self.developmentChannel, "stable", "release-candidate"].contains(channel) else {
             throw AppUpdateConfigurationError.unsupportedChannel(channel)
         }
 
         guard let feed = Self.nonEmptyString(infoDictionary["SUFeedURL"]) else {
             throw AppUpdateConfigurationError.missingValue("SUFeedURL")
         }
-        guard let feedURL = URL(string: feed),
-              feedURL.scheme?.lowercased() == "https",
-              let host = feedURL.host,
-              Self.isLoopbackHost(host)
-        else {
-            throw AppUpdateConfigurationError.invalidDevelopmentFeed(feed)
+        let parsedURL = URL(string: feed)
+        let validTransport = parsedURL?.scheme?.lowercased() == "https"
+            && parsedURL?.host != nil && parsedURL?.user == nil
+            && parsedURL?.password == nil && parsedURL?.fragment == nil
+        if channel == Self.developmentChannel {
+            guard validTransport, let host = parsedURL?.host, Self.isLoopbackHost(host) else {
+                throw AppUpdateConfigurationError.invalidDevelopmentFeed(feed)
+            }
+        } else {
+            guard validTransport, let host = parsedURL?.host, !Self.isLoopbackHost(host) else {
+                throw AppUpdateConfigurationError.invalidPublicFeed(feed)
+            }
+        }
+        guard let feedURL = parsedURL else {
+            throw AppUpdateConfigurationError.invalidPublicFeed(feed)
         }
         guard let publicEdKey = Self.nonEmptyString(infoDictionary["SUPublicEDKey"]) else {
             throw AppUpdateConfigurationError.missingValue("SUPublicEDKey")
@@ -92,6 +105,7 @@ struct AppUpdateConfiguration: Equatable {
             throw AppUpdateConfigurationError.systemProfilingEnabled
         }
 
+        self.channel = channel
         self.feedURL = feedURL
         self.publicEdKey = publicEdKey
     }
@@ -114,12 +128,14 @@ struct AppUpdateConfiguration: Equatable {
 public final class SparkleAppUpdateManager: NSObject, AppUpdateManaging, SPUUpdaterDelegate {
     private var controller: SPUStandardUpdaterController!
     private let developmentTestMarkerURL: URL?
+    private let channel: String
 
     public var canCheckForUpdates: Bool {
         controller.updater.canCheckForUpdates
     }
 
-    private init(developmentTestMarkerURL: URL?) {
+    private init(developmentTestMarkerURL: URL?, channel: String) {
+        self.channel = channel
         self.developmentTestMarkerURL = developmentTestMarkerURL
         super.init()
     }
@@ -132,17 +148,17 @@ public final class SparkleAppUpdateManager: NSObject, AppUpdateManaging, SPUUpda
             return DisabledAppUpdateManager()
         }
 
+        let configuration: AppUpdateConfiguration
         do {
-            _ = try AppUpdateConfiguration(infoDictionary: infoDictionary)
+            configuration = try AppUpdateConfiguration(infoDictionary: infoDictionary)
         } catch {
             IronMLXAppLogger.error("Automatic update configuration rejected: \(error.localizedDescription)")
             return DisabledAppUpdateManager()
         }
 
-        let markerURL = parseDevelopmentUpdateTestMarkerURL(
-            arguments: ProcessInfo.processInfo.arguments
-        )
-        let manager = SparkleAppUpdateManager(developmentTestMarkerURL: markerURL)
+        let markerURL = configuration.channel == AppUpdateConfiguration.developmentChannel
+            ? parseDevelopmentUpdateTestMarkerURL(arguments: ProcessInfo.processInfo.arguments) : nil
+        let manager = SparkleAppUpdateManager(developmentTestMarkerURL: markerURL, channel: configuration.channel)
         manager.controller = SPUStandardUpdaterController(
             startingUpdater: false,
             updaterDelegate: manager,
@@ -172,6 +188,11 @@ public final class SparkleAppUpdateManager: NSObject, AppUpdateManaging, SPUUpda
     public func checkForUpdates(_ sender: Any?) {
         controller.checkForUpdates(sender)
     }
+
+    public func allowedChannels(for updater: SPUUpdater) -> Set<String> {
+        channel == "release-candidate" ? ["release-candidate"] : []
+    }
+
 
     public func updater(
         _ updater: SPUUpdater,

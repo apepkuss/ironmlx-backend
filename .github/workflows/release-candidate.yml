@@ -89,10 +89,29 @@ jobs:
         shell: bash
         run: scripts/checkout-release-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source"
 
+      - name: Configure RC automatic updates
+        id: updates
+        env:
+          PUBLIC_KEY: ${{ vars.IRONMLX_UPDATE_PUBLIC_ED_KEY }}
+          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PUBLIC_KEY" ]; then
+            test "$PUBLISH" != true || { echo 'error: configure IRONMLX_UPDATE_PUBLIC_ED_KEY before publishing' >&2; exit 1; }
+            PUBLIC_KEY="$(swift scripts/generate-development-update-key.swift "$RUNNER_TEMP/validation-update-key")"
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          fi
+          echo "public_key=$PUBLIC_KEY" >> "$GITHUB_OUTPUT"
+
       - name: Build self-contained RC App
         shell: bash
         env:
           MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
+          IRONMLX_UPDATE_CHANNEL: release-candidate
+          IRONMLX_UPDATE_FEED_URL: https://raw.githubusercontent.com/${{ github.repository }}/updates/release-candidate.xml
+          IRONMLX_UPDATE_PUBLIC_ED_KEY: ${{ steps.updates.outputs.public_key }}
         run: env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME scripts/build-app-bundle.sh
 
       - name: Package and verify RC archives
@@ -102,7 +121,7 @@ jobs:
         run: scripts/package-release-candidate.sh "$RC_TAG" validate
 
       - name: Retain verified RC assets
-        if: steps.policy.outputs.distribution_ready == 'true'
+        if: steps.policy.outputs.distribution_ready == 'true' && steps.updates.outputs.configured == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-candidate-${{ steps.release.outputs.tag }}
@@ -139,6 +158,29 @@ jobs:
         with:
           name: release-candidate-${{ needs.validate.outputs.tag }}
           path: .build/development-preview-release/assets
+      - name: Prepare signed RC update payload
+        env:
+          RC_TAG: ${{ needs.validate.outputs.tag }}
+          UPDATE_PRIVATE_KEY: ${{ secrets.IRONMLX_UPDATE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$UPDATE_PRIVATE_KEY" || { echo 'error: missing update signing key' >&2; exit 1; }
+          key_file="$RUNNER_TEMP/rc-update-key"
+          trap 'rm -f "$key_file"' EXIT
+          umask 077
+          printf '%s\n' "$UPDATE_PRIVATE_KEY" > "$key_file"
+          swift package --package-path ironmlx-app resolve
+          assets="$PWD/.build/development-preview-release/assets"
+          (cd "$assets" && shasum -a 256 -c SHA256SUMS)
+          mkdir -p "$RUNNER_TEMP/rc-update-app"
+          ditto -x -k "$assets/"*.zip "$RUNNER_TEMP/rc-update-app"
+          app_paths=("$RUNNER_TEMP/rc-update-app/"*/"IronMLX Release Candidate.app")
+          test "${#app_paths[@]}" = 1
+          python3 scripts/verify-release-identity.py --candidate "$RC_TAG" "${app_paths[0]}"
+          python3 scripts/package-app-update.py "${app_paths[0]}" "$RC_TAG" .build/app-update \
+            --repository "$GITHUB_REPOSITORY" --key-file "$key_file" \
+            --sign-tool ironmlx-app/.build/artifacts/sparkle/Sparkle/bin/sign_update
+
       - name: Publish RC as GitHub Prerelease
         shell: bash
         env:
@@ -153,6 +195,7 @@ jobs:
           shasum -a 256 -c SHA256SUMS
           gh release create "$RC_TAG" \
             ./*.dmg ./*.zip SHA256SUMS \
+            ../../app-update/*.zip ../../app-update/*.xml ../../app-update/update.json \
             DEVELOPMENT-PREVIEW-NOTICE.txt PREVIEW-BUILD-METADATA.json \
             LICENSE NOTICE SBOM.cdx.json THIRD_PARTY_NOTICES.md \
             third-party-inventory.json model-license-boundary.md RELEASE-NOTES.md \
@@ -162,3 +205,8 @@ jobs:
             --notes-file RELEASE-NOTES.md
           test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" --jq .prerelease)" = true
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RC_TAG" --jq .sha)" = "$source_commit"
+
+      - name: Publish RC feed after release download verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish-update-feed.py .build/app-update --repository "$GITHUB_REPOSITORY"
