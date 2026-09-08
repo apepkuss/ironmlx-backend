@@ -20,6 +20,7 @@ fail() {
   exit 1
 }
 
+python3 "$SCRIPT_DIR/verify-release-identity.py" "${3:-v$PRODUCT_VERSION}" "$SOURCE_APP"
 "$SCRIPT_DIR/release-legal-gate.sh"
 "$SCRIPT_DIR/verify-version-consistency.sh"
 [ -d "$SOURCE_APP/Contents" ] || fail "signed App Bundle is missing: $SOURCE_APP"

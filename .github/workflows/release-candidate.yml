@@ -1,0 +1,164 @@
+name: Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing immutable vX.Y.Z-rc.N tag (ad-hoc, not notarized)
+        required: true
+        type: string
+      publish:
+        description: Publish a public GitHub Prerelease after validation
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*-rc.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: macos-26
+    timeout-minutes: 120
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.policy.outputs.commit }}
+      distribution_ready: ${{ steps.policy.outputs.distribution_ready }}
+    steps:
+      - name: Resolve RC tag
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="$INPUT_TAG"
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$ ]] || {
+            echo 'error: expected vX.Y.Z-rc.N with N >= 1' >&2
+            exit 1
+          }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout RC tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify RC identity and distribution policy
+        id: policy
+        shell: bash
+        env:
+          RC_TAG: ${{ steps.release.outputs.tag }}
+          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-release-identity.py --candidate "$RC_TAG"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_SHA^{commit}")"
+          fi
+          scripts/verify-distribution-materials.sh
+          source scripts/release-config.sh
+          echo "distribution_ready=$IRONMLX_PUBLIC_DISTRIBUTION_READY" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISH" = true ]; then
+            scripts/release-legal-gate.sh
+          fi
+          # RC suffix belongs to the tag, while the product version stays X.Y.Z.
+          env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME scripts/verify-version-consistency.sh
+
+      - name: Install pinned build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal
+          cargo install --locked --features cli --version 0.9.1 cargo-about
+
+      - name: Checkout immutable MLX source
+        shell: bash
+        run: scripts/checkout-release-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source"
+
+      - name: Build self-contained RC App
+        shell: bash
+        env:
+          MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
+        run: env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME scripts/build-app-bundle.sh
+
+      - name: Package and verify RC archives
+        shell: bash
+        env:
+          RC_TAG: ${{ steps.release.outputs.tag }}
+        run: scripts/package-release-candidate.sh "$RC_TAG" validate
+
+      - name: Retain verified RC assets
+        if: steps.policy.outputs.distribution_ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate-${{ steps.release.outputs.tag }}
+          path: .build/development-preview-release/assets
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Record validation result
+        run: echo "RC archives verified. Downloadable assets are retained only when public distribution is authorized." >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && needs.validate.outputs.distribution_ready == 'true'
+    runs-on: macos-26
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recheck publication authorization and identity
+        env:
+          RC_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          python3 scripts/verify-release-identity.py --candidate "$RC_TAG"
+          scripts/release-legal-gate.sh
+      - name: Download validated assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-candidate-${{ needs.validate.outputs.tag }}
+          path: .build/development-preview-release/assets
+      - name: Publish RC as GitHub Prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-release-identity.py --candidate "$RC_TAG"
+          source_commit="$(git rev-parse HEAD)"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RC_TAG" --jq .sha)" = "$source_commit"
+          cd .build/development-preview-release/assets
+          shasum -a 256 -c SHA256SUMS
+          gh release create "$RC_TAG" \
+            ./*.dmg ./*.zip SHA256SUMS \
+            DEVELOPMENT-PREVIEW-NOTICE.txt PREVIEW-BUILD-METADATA.json \
+            LICENSE NOTICE SBOM.cdx.json THIRD_PARTY_NOTICES.md \
+            third-party-inventory.json model-license-boundary.md RELEASE-NOTES.md \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --prerelease --latest=false \
+            --title "IronMLX $RC_TAG (ADHOC-NOT-NOTARIZED)" \
+            --notes-file RELEASE-NOTES.md
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" --jq .prerelease)" = true
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RC_TAG" --jq .sha)" = "$source_commit"

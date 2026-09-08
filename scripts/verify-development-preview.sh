@@ -20,7 +20,17 @@ fail() {
 }
 
 [ -d "$asset_dir" ] || fail "asset directory not found: $asset_dir"
-[[ "$preview_tag" =~ ^preview-[0-9]{8}-[0-9a-f]{7}$ ]] || fail "invalid preview tag"
+channel="${4:-development-preview}"
+app_name="IronMLX Development Preview"
+if [ "$channel" = "release-candidate" ]; then
+  python3 "$SCRIPT_DIR/verify-release-identity.py" --candidate "$preview_tag"
+  [ "$source_commit" = "$(git -C "$REPO_ROOT" rev-parse HEAD)" ] || fail "RC source commit mismatch"
+  app_name="IronMLX Release Candidate"
+elif [ "$channel" = "development-preview" ]; then
+  [[ "$preview_tag" =~ ^preview-[0-9]{8}-[0-9a-f]{7}$ ]] || fail "invalid preview tag"
+else
+  fail "unsupported prerelease channel: $channel"
+fi
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || fail "invalid source commit"
 
 package_name="IronMLX-$PRODUCT_VERSION-$preview_tag-ADHOC-NOT-NOTARIZED"
@@ -46,6 +56,8 @@ grep -Fq "$IRONMLX_PREVIEW_WARNING_ZH" "$asset_dir/DEVELOPMENT-PREVIEW-NOTICE.tx
   fail "preview notice does not contain the required warning"
 grep -Fq "$IRONMLX_PREVIEW_WARNING_ZH" "$asset_dir/RELEASE-NOTES.md" || \
   fail "release notes do not contain the required warning"
+
+[ "$(plutil -extract distribution_channel raw "$asset_dir/PREVIEW-BUILD-METADATA.json")" = "$channel" ] || fail "metadata channel mismatch"
 
 [ "$(plutil -extract preview_tag raw "$asset_dir/PREVIEW-BUILD-METADATA.json")" = "$preview_tag" ] || \
   fail "metadata preview tag mismatch"
@@ -105,7 +117,7 @@ trap cleanup EXIT
 
 verify_preview_app() {
   local package_root="$1"
-  local preview_app="$package_root/IronMLX Development Preview.app"
+  local preview_app="$package_root/$app_name.app"
   local signature_details
 
   diff -q "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$package_root/THIRD_PARTY_NOTICES.md" >/dev/null || \
@@ -123,12 +135,18 @@ verify_preview_app() {
   diff -q "$REPO_ROOT/docs/model-license-boundary.md" "$package_root/model-license-boundary.md" >/dev/null || \
     fail "archive root model license boundary differs from the verified source material"
   [ -d "$preview_app/Contents" ] || fail "preview App is missing: $preview_app"
+  if [ "$channel" = "release-candidate" ]; then
+    python3 "$SCRIPT_DIR/verify-release-identity.py" --candidate "$preview_tag" "$preview_app"
+    [ "$(plutil -extract IronMLXPreviewTag raw "$preview_app/Contents/Info.plist")" = "$preview_tag" ] || fail "RC Bundle tag mismatch"
+    diff -q "$asset_dir/PREVIEW-BUILD-METADATA.json" "$preview_app/Contents/Resources/PREVIEW-BUILD-METADATA.json" || fail "RC Bundle metadata mismatch"
+    diff -q "$asset_dir/PREVIEW-BUILD-METADATA.json" "$package_root/PREVIEW-BUILD-METADATA.json" || fail "RC archive metadata mismatch"
+  fi
   "$SCRIPT_DIR/verify-app-bundle.sh" "$preview_app"
   "$SCRIPT_DIR/verify-model-distribution-boundary.sh" "$preview_app"
   [ "$(plutil -extract CFBundleDisplayName raw "$preview_app/Contents/Info.plist")" = \
-    "IronMLX Development Preview" ] || fail "preview display name is not explicit"
+    "$app_name" ] || fail "preview display name is not explicit"
   [ "$(plutil -extract IronMLXDistributionChannel raw "$preview_app/Contents/Info.plist")" = \
-    "development-preview" ] || fail "preview distribution channel is missing"
+    "$channel" ] || fail "preview distribution channel is missing"
   [ "$(plutil -extract IronMLXDeveloperIDSigned raw "$preview_app/Contents/Info.plist")" = "unsigned" ] || \
     fail "preview App must declare Developer ID signing disabled"
   [ "$(plutil -extract IronMLXNotarizationStatus raw "$preview_app/Contents/Info.plist")" = \

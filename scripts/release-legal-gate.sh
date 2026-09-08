@@ -16,21 +16,6 @@ fail() {
 [ "$IRONMLX_PUBLIC_DISTRIBUTION_READY" = "true" ] || fail \
   "public distribution is disabled; complete P0-8B and explicitly enable it in scripts/release-config.sh"
 
-for required in \
-  "$REPO_ROOT/LICENSE" \
-  "$REPO_ROOT/NOTICE" \
-  "$REPO_ROOT/THIRD_PARTY_NOTICES.md" \
-  "$REPO_ROOT/third-party-inventory.json" \
-  "$REPO_ROOT/docs/model-license-boundary.md" \
-  "$REPO_ROOT/SBOM.cdx.json"; do
-  [ -s "$required" ] || fail "required distribution material is missing or empty: $required"
-done
-
-"$SCRIPT_DIR/verify-sbom.sh"
-
-licenses_dir="$REPO_ROOT/THIRD_PARTY_LICENSES"
-[ -d "$licenses_dir" ] || fail "required third-party license directory is missing: $licenses_dir"
-find "$licenses_dir" -type f -size +0c -print -quit | grep -q . || \
-  fail "third-party license directory contains no non-empty license text"
+"$SCRIPT_DIR/verify-distribution-materials.sh"
 
 echo "IronMLX public-distribution legal gate passed"

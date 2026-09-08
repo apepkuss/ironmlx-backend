@@ -87,6 +87,10 @@ jobs:
         shell: bash
         run: scripts/verify-version-consistency.sh
 
+      - name: Test stable release identity gate
+        shell: bash
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_verify_release_identity.py -v
+
       - name: Verify deterministic CycloneDX SBOM
         shell: bash
         run: scripts/verify-sbom.sh

@@ -10,6 +10,7 @@ on:
   push:
     tags:
       - "v*"
+      - "!v*-*"
 
 permissions:
   contents: write
@@ -47,24 +48,28 @@ jobs:
       - name: Checkout immutable release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.release.outputs.tag }}
+          ref: refs/tags/${{ steps.release.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Verify tag and legal release gate
         shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          test "$(git describe --exact-match --tags HEAD)" = "${{ steps.release.outputs.tag }}"
+          python3 scripts/verify-release-identity.py "$RELEASE_TAG"
           scripts/verify-version-consistency.sh
           scripts/release-legal-gate.sh
 
       - name: Verify signed and notarized App Bundle
         shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           test -d dist/IronMLX.app
-          scripts/package-stable-release.sh dist/IronMLX.app .build/stable-release
+          scripts/package-stable-release.sh dist/IronMLX.app .build/stable-release "$RELEASE_TAG"
 
       - name: Publish immutable stable release
         shell: bash

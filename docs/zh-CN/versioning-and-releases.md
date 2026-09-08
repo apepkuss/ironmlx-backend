@@ -56,3 +56,61 @@ P0-8B 完成后，只有同时满足以下条件才能由单独评审显式开�
 第三方材料由 P0-8A 的锁定工程流程生成，更新与验证方式见
 [第三方依赖与许可证材料](third-party-materials.md)。这些材料存在并不等于完成
 法律判断，也不会自动解除 public distribution 门禁。
+
+## 正式发布产物身份
+
+正式打包前，使用明确的现有发布 tag 检查源码及 App：
+
+```bash
+python3 scripts/verify-release-identity.py v0.1.0
+python3 scripts/verify-release-identity.py v0.1.0 dist/IronMLX.app
+```
+
+源码检查要求 `refs/tags/` 下的 tag 指向 HEAD、与 `VERSION` 一致，且工作区
+clean，包括未忽略的未跟踪文件。支持 lightweight 和 annotated tag。提供 App
+参数时，还要求产品版本、build number、来源提交一致，来源状态为 `clean`。
+正式打包脚本始终执行两项检查；第三个参数为发布 tag，默认是 `v` 加 `VERSION`。
+自动和手动触发的正式工作流均显式传入选定 tag。
+
+此门禁检查身份元数据，不证明密码学构建来源，也不替代签名和公证检查。
+本地开发构建及其静态 Bundle 检查仍允许 dirty 源码。
+
+RC 身份验收使用独立的显式模式：
+
+```bash
+python3 scripts/verify-release-identity.py --candidate v0.1.0-rc.1 dist/IronMLX.app
+```
+
+候选模式只接受 `vX.Y.Z-rc.N`，N 必须为无前导零的正整数。基础版本 `X.Y.Z`
+必须与 App 版本和 `VERSION` 一致，仍执行 clean、tag/HEAD、build number 和
+Bundle 来源检查。正式打包和发布不启用此模式，继续拒绝 RC tag。
+
+## RC 打包与发布
+
+`Release Candidate` 工作流接受现有 `vX.Y.Z-rc.N` tag，可通过推送 tag 或手动填写
+`release_tag` 触发。手动触发要求工作流已进入默认分支；选定 tag 必须包含 RC
+脚本。不会移动或重建 tag，也不覆盖已有 Release。发布改动提交后应创建新的 RC
+tag，不能移动早先的 RC tag。
+
+对同一 clean tag 构建的 `dist/IronMLX.app` 执行本地归档验证：
+
+```bash
+scripts/package-release-candidate.sh v0.1.0-rc.2 validate
+```
+
+产物复用预览归档引擎，位于 `.build/development-preview-release/assets`。
+DMG/ZIP 文件名含 RC tag 和 `ADHOC-NOT-NOTARIZED`，App 名称为
+`IronMLX Release Candidate.app`，分发通道为 `release-candidate`。沿用的
+`DEVELOPMENT-PREVIEW-NOTICE.txt` 与 `PREVIEW-BUILD-METADATA.json` 文件名属于
+共享归档格式，其内容明确记录 RC tag 和通道。打包前及两种归档解开后均核对身份。
+
+工作流构建固定 MLX 和 Release App，校验归档及 SHA-256。手动触发默认仅验证，
+推送 RC tag 也仅验证。只有手动选择 `publish=true`，才进入独立的写权限任务，
+强制核对分发授权后创建 GitHub **Prerelease**，不标为 Latest。
+
+验证模式始终检查材料完整性和 SBOM 一致性；分发未授权时不上传安装包 artifact，
+只在任务摘要中记录验证结果。授权后才可保留可下载的 Actions artifact。
+本地打包支持 `validate`（默认）与 `publish`；后者在打包前强制检查分发授权。
+本通道不执行 Developer ID
+签名或公证，也不证明正常 Gatekeeper 安装或生产自动更新已经通过。正式发布通道
+排除候选 tag。

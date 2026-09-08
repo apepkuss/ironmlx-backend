@@ -10,7 +10,14 @@ readonly REPO_ROOT
 # shellcheck source=release-config.sh
 source "$SCRIPT_DIR/release-config.sh"
 
-"$SCRIPT_DIR/release-legal-gate.sh"
+case "${4:-publish}" in
+  validate)
+    [ "${3:-}" = release-candidate ] || { echo "error: validation-only packaging requires RC channel" >&2; exit 1; }
+    "$SCRIPT_DIR/verify-distribution-materials.sh"
+    ;;
+  publish) "$SCRIPT_DIR/release-legal-gate.sh" ;;
+  *) echo "error: invalid packaging mode" >&2; exit 1 ;;
+esac
 
 readonly SOURCE_APP="$REPO_ROOT/dist/IronMLX.app"
 readonly BUILD_ROOT="$REPO_ROOT/.build/development-preview-release"
@@ -25,11 +32,19 @@ fail() {
   exit 1
 }
 
-[[ "$preview_tag" =~ ^preview-[0-9]{8}-[0-9a-f]{7}$ ]] || \
-  fail "preview tag must match preview-YYYYMMDD-shortSHA: $preview_tag"
-[[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || fail "source commit must be a full lowercase SHA"
-[ "${preview_tag##*-}" = "${source_commit:0:7}" ] || \
-  fail "preview tag short SHA does not match source commit"
+channel="${3:-development-preview}"
+app_name="IronMLX Development Preview"
+if [ "$channel" = "release-candidate" ]; then
+  python3 "$SCRIPT_DIR/verify-release-identity.py" --candidate "$preview_tag" "$SOURCE_APP"
+  [ "$source_commit" = "$(git -C "$REPO_ROOT" rev-parse HEAD)" ] || fail "RC source commit mismatch"
+  app_name="IronMLX Release Candidate"
+elif [ "$channel" = "development-preview" ]; then
+  [[ "$preview_tag" =~ ^preview-[0-9]{8}-[0-9a-f]{7}$ ]] || fail "invalid preview tag"
+  [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || fail "invalid source commit"
+  [ "${preview_tag##*-}" = "${source_commit:0:7}" ] || fail "preview tag SHA mismatch"
+else
+  fail "unsupported prerelease channel: $channel"
+fi
 [ -d "$SOURCE_APP/Contents" ] || fail "build the App Bundle first: $SOURCE_APP"
 
 for tool in codesign ditto hdiutil plutil shasum; do
@@ -38,7 +53,7 @@ done
 
 package_name="IronMLX-$PRODUCT_VERSION-$preview_tag-ADHOC-NOT-NOTARIZED"
 package_root="$BUILD_ROOT/$package_name"
-preview_app="$package_root/IronMLX Development Preview.app"
+preview_app="$package_root/$app_name.app"
 notice_file="$package_root/DEVELOPMENT-PREVIEW-NOTICE.txt"
 metadata_file="$package_root/PREVIEW-BUILD-METADATA.json"
 third_party_notices="$package_root/THIRD_PARTY_NOTICES.md"
@@ -61,7 +76,7 @@ cp "$REPO_ROOT/NOTICE" "$project_notice"
 cp "$REPO_ROOT/SBOM.cdx.json" "$sbom"
 
 cat > "$notice_file" <<EOF
-IronMLX Development Preview / IronMLX 开发预览
+$app_name / $channel
 
 警告：${IRONMLX_PREVIEW_WARNING_ZH}。
 WARNING: ${IRONMLX_PREVIEW_WARNING_EN}.
@@ -81,7 +96,7 @@ cat > "$metadata_file" <<EOF
   "apple_notarized": false,
   "created_at_utc": "$created_at",
   "developer_id_signed": false,
-  "distribution_channel": "development-preview",
+  "distribution_channel": "$channel",
   "ironmlx_commit": "$source_commit",
   "mlx_commit": "$IRONMLX_MLX_COMMIT",
   "mlx_repository": "$IRONMLX_MLX_REPOSITORY",
@@ -96,15 +111,17 @@ EOF
 
 cp "$notice_file" "$preview_app/Contents/Resources/DEVELOPMENT-PREVIEW-NOTICE.txt"
 cp "$metadata_file" "$preview_app/Contents/Resources/PREVIEW-BUILD-METADATA.json"
-plutil -replace CFBundleDisplayName -string "IronMLX Development Preview" \
+plutil -replace CFBundleDisplayName -string "$app_name" \
   "$preview_app/Contents/Info.plist"
-plutil -replace IronMLXDistributionChannel -string "development-preview" \
+plutil -replace IronMLXDistributionChannel -string "$channel" \
   "$preview_app/Contents/Info.plist"
 plutil -replace IronMLXDeveloperIDSigned -string unsigned "$preview_app/Contents/Info.plist"
 plutil -replace IronMLXNotarizationStatus -string not_notarized "$preview_app/Contents/Info.plist"
 plutil -insert IronMLXAppleNotarized -bool NO "$preview_app/Contents/Info.plist"
 plutil -insert IronMLXPreviewTag -string "$preview_tag" "$preview_app/Contents/Info.plist"
-plutil -replace IronMLXSourceCommit -string "$source_commit" "$preview_app/Contents/Info.plist"
+if [ "$channel" = "development-preview" ]; then
+  plutil -replace IronMLXSourceCommit -string "$source_commit" "$preview_app/Contents/Info.plist"
+fi
 source_tree_state="$(plutil -extract IronMLXSourceTreeState raw "$preview_app/Contents/Info.plist")"
 [[ "$source_tree_state" =~ ^(clean|dirty)$ ]] || fail "source App has invalid IronMLXSourceTreeState"
 plutil -replace IronMLXMLXCommit -string "$IRONMLX_MLX_COMMIT" "$preview_app/Contents/Info.plist"
@@ -121,7 +138,7 @@ zip_path="$ASSET_DIR/$package_name.zip"
 dmg_path="$ASSET_DIR/$package_name.dmg"
 ditto -c -k --sequesterRsrc --keepParent "$package_root" "$zip_path"
 hdiutil create \
-  -volname "IronMLX Dev Preview" \
+  -volname "$app_name" \
   -srcfolder "$package_root" \
   -format UDZO \
   -ov \
@@ -141,13 +158,13 @@ cp "$project_notice" "$ASSET_DIR/NOTICE"
 cp "$sbom" "$ASSET_DIR/SBOM.cdx.json"
 
 cat > "$ASSET_DIR/RELEASE-NOTES.md" <<EOF
-# ⚠️ IronMLX 开发预览
+# ⚠️ $app_name
 
 > **${IRONMLX_PREVIEW_WARNING_ZH}。**
 
 This prerelease is **${IRONMLX_PREVIEW_WARNING_EN}**.
 
-- Channel: GitHub Actions development preview
+- Channel: $channel
 - Product version: \`$PRODUCT_VERSION\`
 - Preview tag: \`$preview_tag\`
 - IronMLX immutable commit: \`$source_commit\`
@@ -183,5 +200,5 @@ EOF
   done >> SHA256SUMS
 )
 
-"$SCRIPT_DIR/verify-development-preview.sh" "$ASSET_DIR" "$preview_tag" "$source_commit"
+"$SCRIPT_DIR/verify-development-preview.sh" "$ASSET_DIR" "$preview_tag" "$source_commit" "$channel"
 echo "Development preview assets: $ASSET_DIR"
