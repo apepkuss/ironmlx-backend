@@ -116,3 +116,28 @@ only the validation result is retained in the job summary. Local packaging accep
 Neither mode signs with Developer ID or notarizes. Normal Gatekeeper
 installation acceptance and production automatic updates are not established
 by this channel. Stable publication excludes prerelease tags.
+
+## Stable archive layout and independent content verification
+
+Stable assets now use one output directory containing `IronMLX-X.Y.Z.dmg`,
+`IronMLX-X.Y.Z.zip`, `SHA256SUMS`, the individual legal materials and
+`THIRD_PARTY_LICENSES/`. The ZIP has an `IronMLX-X.Y.Z/` root; the mounted DMG
+has the same contents at its volume root. Both contain `IronMLX.app` and all
+legal materials. The output directory must be absent or empty; existing
+artifacts are never automatically deleted.
+
+Archive mechanics can be validated without a release tag or Developer ID:
+
+```bash
+python3 scripts/release-archives.py assemble dist/IronMLX.app .build/archive-check
+python3 scripts/release-archives.py verify dist/IronMLX.app .build/archive-check
+```
+
+This checks current materials/SBOM, product version and identifier, exact
+checksum coverage, actual ZIP extraction and read-only DMG mounting, and every
+App file, executable bit and symlink against the reference Bundle (including
+version/source metadata and embedded legal files). It does not certify that the
+reference Bundle is a current, clean, signed release. The stable packager retains
+identity, clean-source, legal-authorization, static Bundle, signing and Gatekeeper
+gates before invoking this archive engine. Content-only artifacts must not be
+published as approved stable releases.

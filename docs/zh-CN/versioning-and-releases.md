@@ -114,3 +114,23 @@ DMG/ZIP 文件名含 RC tag 和 `ADHOC-NOT-NOTARIZED`，App 名称为
 本通道不执行 Developer ID
 签名或公证，也不证明正常 Gatekeeper 安装或生产自动更新已经通过。正式发布通道
 排除候选 tag。
+
+## 正式归档布局与独立内容验证
+
+正式输出目录统一包含 `IronMLX-X.Y.Z.dmg`、`IronMLX-X.Y.Z.zip`、`SHA256SUMS`、
+独立法律材料和 `THIRD_PARTY_LICENSES/`。ZIP 内以 `IronMLX-X.Y.Z/` 为根目录，
+DMG 卷根目录放置相同内容：`IronMLX.app` 和所有法律材料。输出目录必须不存在或
+为空；脚本不自动删除旧产物。
+
+无需 release tag 或 Developer ID 即可验证归档机制：
+
+```bash
+python3 scripts/release-archives.py assemble dist/IronMLX.app .build/archive-check
+python3 scripts/release-archives.py verify dist/IronMLX.app .build/archive-check
+```
+
+检查涵盖当前材料/SBOM、产品版本和标识、完整校验和清单、实际 ZIP 解压与 DMG
+只读挂载，以及 App 每个文件、执行位和符号链接与参考 Bundle 的一致性，包括
+版本/来源元数据及内嵌法律材料。这不证明参考 Bundle 来自当前 clean 提交或已签名。
+正式打包入口仍先执行身份、clean、分发授权、静态 Bundle、签名与 Gatekeeper 门禁。
+仅内容验证产生的文件不能作为已批准的正式版发布。

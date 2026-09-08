@@ -43,45 +43,6 @@ distribution_channel="$(plutil -extract IronMLXDistributionChannel raw "$SOURCE_
 codesign --verify --deep --strict --verbose=2 "$SOURCE_APP"
 spctl --assess --type execute --verbose=4 "$SOURCE_APP"
 
-package_name="IronMLX-$PRODUCT_VERSION"
-package_root="$OUTPUT_DIR/$package_name"
-release_app="$package_root/IronMLX.app"
-rm -rf "$OUTPUT_DIR"
-mkdir -p "$package_root"
-ditto "$SOURCE_APP" "$release_app"
-
-cp "$REPO_ROOT/LICENSE" "$package_root/LICENSE"
-cp "$REPO_ROOT/NOTICE" "$package_root/NOTICE"
-cp "$REPO_ROOT/SBOM.cdx.json" "$package_root/SBOM.cdx.json"
-cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$package_root/THIRD_PARTY_NOTICES.md"
-cp "$REPO_ROOT/third-party-inventory.json" "$package_root/third-party-inventory.json"
-cp "$REPO_ROOT/docs/model-license-boundary.md" "$package_root/model-license-boundary.md"
-cp -R "$REPO_ROOT/THIRD_PARTY_LICENSES" "$package_root/THIRD_PARTY_LICENSES"
-
-zip_path="$OUTPUT_DIR/$package_name.zip"
-dmg_path="$OUTPUT_DIR/$package_name.dmg"
-ditto -c -k --sequesterRsrc --keepParent "$package_root" "$zip_path"
-hdiutil create \
-  -volname "IronMLX $PRODUCT_VERSION" \
-  -srcfolder "$package_root" \
-  -format UDZO \
-  -ov \
-  "$dmg_path" >/dev/null
-
-"$SCRIPT_DIR/verify-model-distribution-boundary.sh" "$zip_path"
-"$SCRIPT_DIR/verify-model-distribution-boundary.sh" "$dmg_path"
-
-(
-  cd "$OUTPUT_DIR"
-  shasum -a 256 \
-    "$(basename "$dmg_path")" \
-    "$(basename "$zip_path")" \
-    LICENSE NOTICE SBOM.cdx.json THIRD_PARTY_NOTICES.md \
-    third-party-inventory.json model-license-boundary.md > SHA256SUMS
-  find THIRD_PARTY_LICENSES -type f -print | LC_ALL=C sort | while IFS= read -r license_file; do
-    shasum -a 256 "$license_file"
-  done >> SHA256SUMS
-  shasum -a 256 -c SHA256SUMS >/dev/null
-)
+python3 "$SCRIPT_DIR/release-archives.py" assemble "$SOURCE_APP" "$OUTPUT_DIR"
 
 echo "Stable release assets: $OUTPUT_DIR"
