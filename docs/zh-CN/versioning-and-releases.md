@@ -136,3 +136,5 @@ python3 scripts/release-archives.py verify dist/IronMLX.app .build/archive-check
 仅内容验证产生的文件不能作为已批准的正式版发布。
 
 公网 Sparkle 通道配置及 feed 发布流程见[自动更新](automatic-updates.md)。
+
+稳定版构建、凭据、仅验证模式及草稿发布流程见[稳定版发布流水线](stable-release-pipeline.md)。

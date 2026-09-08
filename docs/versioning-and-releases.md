@@ -144,3 +144,5 @@ published as approved stable releases.
 
 Public Sparkle channel configuration and feed deployment are documented in
 [Automatic updates](automatic-updates.md).
+
+See [Stable release pipeline](stable-release-pipeline.md) for validation-only dispatch, signing credentials and draft publication.

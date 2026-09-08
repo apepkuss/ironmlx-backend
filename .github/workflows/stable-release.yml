@@ -7,24 +7,27 @@ on:
         description: Existing immutable vX.Y.Z tag to package
         required: true
         type: string
+      publish:
+        description: Sign, notarize and publicly release after validation
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
       - "!v*-*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: stable-release-${{ github.ref_name }}
+  group: stable-release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   package-stable:
-    name: Package signed and notarized stable release
+    name: Build and validate stable candidate
     runs-on: macos-26
-    timeout-minutes: 120
-    environment: stable-release
+    timeout-minutes: 180
 
     steps:
       - name: Resolve immutable release tag
@@ -52,28 +55,133 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify tag and legal release gate
+      - name: Verify tag and distribution materials
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           python3 scripts/verify-release-identity.py "$RELEASE_TAG"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_SHA^{commit}")"
+          fi
           scripts/verify-version-consistency.sh
-          scripts/release-legal-gate.sh
+          scripts/verify-distribution-materials.sh
 
-      - name: Verify signed and notarized App Bundle
-        shell: bash
+      - name: Install pinned build tools
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          cargo install --locked --features cli --version 0.9.1 cargo-about
+
+      - name: Checkout immutable MLX source
+        run: scripts/checkout-release-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source"
+
+      - name: Build self-contained stable candidate
+        env:
+          MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
+          IRONMLX_DISTRIBUTION_CHANNEL: stable
+          IRONMLX_UPDATE_CHANNEL: stable
+          IRONMLX_UPDATE_FEED_URL: https://raw.githubusercontent.com/${{ github.repository }}/updates/stable.xml
+          IRONMLX_UPDATE_PUBLIC_ED_KEY: ${{ vars.IRONMLX_UPDATE_PUBLIC_ED_KEY }}
+        run: scripts/build-app-bundle.sh
+
+      - name: Validate identity and archive contents without Apple credentials
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          set -euo pipefail
-          test -d dist/IronMLX.app
-          scripts/package-stable-release.sh dist/IronMLX.app .build/stable-release "$RELEASE_TAG"
+          python3 scripts/verify-release-identity.py "$RELEASE_TAG" dist/IronMLX.app
+          python3 scripts/release-archives.py assemble dist/IronMLX.app .build/stable-validation
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_stable_release.py -v
+
+      - name: Authorize production artifact transfer
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        run: scripts/release-legal-gate.sh
+
+      - name: Preserve validated App including signatures and symlinks
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        run: ditto -c -k --sequesterRsrc --keepParent dist/IronMLX.app .build/stable-candidate.zip
+
+      - name: Transfer validated candidate
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stable-candidate-${{ steps.release.outputs.tag }}
+          path: .build/stable-candidate.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Record fixed source
+        id: source
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.source.outputs.commit }}
+
+  publish:
+    needs: package-stable
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: macos-26
+    timeout-minutes: 180
+    environment: stable-release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout validated source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.package-stable.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download validated candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stable-candidate-${{ needs.package-stable.outputs.tag }}
+          path: .build/validated-candidate
+
+      - name: Recheck identity and release authorization
+        env:
+          RELEASE_TAG: ${{ needs.package-stable.outputs.tag }}
+        run: |
+          ditto -x -k .build/validated-candidate/stable-candidate.zip dist
+          python3 scripts/verify-release-identity.py "$RELEASE_TAG" dist/IronMLX.app
+          scripts/release-legal-gate.sh
+          scripts/verify-app-bundle.sh dist/IronMLX.app
+
+      - name: Sign and notarize App
+        env:
+          IRONMLX_DEVELOPER_ID_P12_BASE64: ${{ secrets.IRONMLX_DEVELOPER_ID_P12_BASE64 }}
+          IRONMLX_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.IRONMLX_DEVELOPER_ID_P12_PASSWORD }}
+          IRONMLX_SIGNING_IDENTITY: ${{ vars.IRONMLX_SIGNING_IDENTITY }}
+          IRONMLX_APPLE_TEAM_ID: ${{ vars.IRONMLX_APPLE_TEAM_ID }}
+          IRONMLX_NOTARY_KEY_ID: ${{ secrets.IRONMLX_NOTARY_KEY_ID }}
+          IRONMLX_NOTARY_ISSUER_ID: ${{ secrets.IRONMLX_NOTARY_ISSUER_ID }}
+          IRONMLX_NOTARY_PRIVATE_KEY: ${{ secrets.IRONMLX_NOTARY_PRIVATE_KEY }}
+        run: scripts/sign-notarize-app.sh dist/IronMLX.app
+
+      - name: Verify and package signed notarized App
+        env:
+          RELEASE_TAG: ${{ needs.package-stable.outputs.tag }}
+        run: scripts/package-stable-release.sh dist/IronMLX.app .build/stable-release "$RELEASE_TAG"
+
+      - name: Sign and notarize final DMG
+        env:
+          IRONMLX_DEVELOPER_ID_P12_BASE64: ${{ secrets.IRONMLX_DEVELOPER_ID_P12_BASE64 }}
+          IRONMLX_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.IRONMLX_DEVELOPER_ID_P12_PASSWORD }}
+          IRONMLX_SIGNING_IDENTITY: ${{ vars.IRONMLX_SIGNING_IDENTITY }}
+          IRONMLX_APPLE_TEAM_ID: ${{ vars.IRONMLX_APPLE_TEAM_ID }}
+          IRONMLX_NOTARY_KEY_ID: ${{ secrets.IRONMLX_NOTARY_KEY_ID }}
+          IRONMLX_NOTARY_ISSUER_ID: ${{ secrets.IRONMLX_NOTARY_ISSUER_ID }}
+          IRONMLX_NOTARY_PRIVATE_KEY: ${{ secrets.IRONMLX_NOTARY_PRIVATE_KEY }}
+        run: |
+          scripts/sign-notarize-app.sh .build/stable-release/*.dmg
+          python3 scripts/release-archives.py finalize-dmg dist/IronMLX.app .build/stable-release
 
       - name: Prepare signed stable update payload
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TAG: ${{ needs.package-stable.outputs.tag }}
           UPDATE_PRIVATE_KEY: ${{ secrets.IRONMLX_UPDATE_PRIVATE_ED_KEY }}
         run: |
           set -euo pipefail
@@ -87,30 +195,20 @@ jobs:
             --repository "$GITHUB_REPOSITORY" --key-file "$key_file" \
             --sign-tool ironmlx-app/.build/artifacts/sparkle/Sparkle/bin/sign_update
 
-      - name: Publish immutable stable release
-        shell: bash
+      - name: Upload and verify draft before public release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          set -euo pipefail
-          gh release create "$RELEASE_TAG" \
-            .build/app-update/*.zip .build/app-update/*.xml .build/app-update/update.json \
-            .build/stable-release/*.dmg \
-            .build/stable-release/*.zip \
-            .build/stable-release/SHA256SUMS \
-            .build/stable-release/LICENSE \
-            .build/stable-release/NOTICE \
-            .build/stable-release/SBOM.cdx.json \
-            .build/stable-release/THIRD_PARTY_NOTICES.md \
-            .build/stable-release/third-party-inventory.json \
-            .build/stable-release/model-license-boundary.md \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$(git rev-parse HEAD)" \
-            --title "IronMLX $RELEASE_TAG" \
-            --generate-notes
+          RELEASE_TAG: ${{ needs.package-stable.outputs.tag }}
+        run: python3 scripts/publish-stable-release.py "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY"
 
       - name: Publish stable feed after release download verification
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/publish-update-feed.py .build/app-update --repository "$GITHUB_REPOSITORY"
+
+      - name: Remove temporary signing credentials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/ironmlx-signing/signing.keychain-db" >/dev/null 2>&1 || true
+          rm -rf "$RUNNER_TEMP/ironmlx-signing"
+          rm -f "$RUNNER_TEMP/stable-update-key"

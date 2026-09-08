@@ -146,7 +146,7 @@ def assemble(repo, app, output, package):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("assemble", "verify"))
+    parser.add_argument("action", choices=("assemble", "verify", "finalize-dmg"))
     parser.add_argument("app", type=Path, help="reference App already checked by the caller")
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
@@ -159,6 +159,13 @@ def main():
     require(info.get("CFBundleShortVersionString") == version, "reference App version mismatch")
     require(info.get("CFBundleIdentifier") == "com.ironmlx.app", "reference App identifier mismatch")
     run(repo / "scripts/verify-distribution-materials.sh")
+    if args.action == "finalize-dmg":
+        # Signing/stapling changes the container bytes, never the mounted App.
+        dmg = output / f"IronMLX-{version}.dmg"
+        run("codesign", "--verify", "--strict", dmg)
+        run("xcrun", "stapler", "validate", dmg)
+        run("spctl", "--assess", "--type", "open", "--context", "context:primary-signature", dmg)
+        (output / "SHA256SUMS").write_text(checksums(repo, output, f"IronMLX-{version}"))
     operation = assemble if args.action == "assemble" else verify
     operation(repo, app, output, f"IronMLX-{version}")
     print(f"Archive {args.action} passed (content only, not distribution approval): {output}")

@@ -25,7 +25,7 @@ python3 "$SCRIPT_DIR/verify-release-identity.py" "${3:-v$PRODUCT_VERSION}" "$SOU
 "$SCRIPT_DIR/verify-version-consistency.sh"
 [ -d "$SOURCE_APP/Contents" ] || fail "signed App Bundle is missing: $SOURCE_APP"
 
-for tool in codesign ditto hdiutil plutil shasum spctl; do
+for tool in codesign ditto hdiutil plutil shasum spctl xcrun; do
   command -v "$tool" >/dev/null || fail "required packaging tool is missing: $tool"
 done
 
@@ -41,6 +41,7 @@ distribution_channel="$(plutil -extract IronMLXDistributionChannel raw "$SOURCE_
 
 "$SCRIPT_DIR/verify-app-bundle.sh" "$SOURCE_APP"
 codesign --verify --deep --strict --verbose=2 "$SOURCE_APP"
+xcrun stapler validate "$SOURCE_APP"
 spctl --assess --type execute --verbose=4 "$SOURCE_APP"
 
 python3 "$SCRIPT_DIR/release-archives.py" assemble "$SOURCE_APP" "$OUTPUT_DIR"

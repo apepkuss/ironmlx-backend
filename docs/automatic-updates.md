@@ -69,8 +69,8 @@ requires the persistent public key and private-key secret.
    changes fail rather than overwrite another channel's feed.
 
 The RC workflow has this sequence in its explicit publication job. The stable
-workflow has update payload/feed steps, but still requires the separate stable
-build/sign/notarize pipeline to supply its approved Bundle. This does not remove
+workflow builds, signs and notarizes the Bundle before packaging updates; see
+[Stable release pipeline](stable-release-pipeline.md). This does not remove
 any Developer ID, notarization or distribution authorization gate.
 
 If Release creation succeeded but feed publication failed, reuse the exact
