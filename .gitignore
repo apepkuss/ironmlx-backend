@@ -9,3 +9,4 @@ __pycache__/
 ironmlx/tests/fixtures/qwen35/*.npy
 /reports/
 /dist/
+AGENTS.md
